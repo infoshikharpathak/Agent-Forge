@@ -138,9 +138,20 @@ for event in stream_run(goal, int(max_rounds)):
 
     elif etype == "plan_ready":
         orch_raw.code(plan_text, language="json")
-        specs = event["specs"]
+        strategy = event.get("strategy", "autogen")
+
+        # Normalise: both strategies expose a flat list of node/agent dicts
+        if strategy == "langgraph":
+            spec_obj = event["spec"]
+            specs = spec_obj["nodes"]
+            edges = spec_obj.get("edges", [])
+            orch_status.success(f"Planned LangGraph pipeline — {len(specs)} node(s)")
+        else:
+            specs = event["specs"]
+            edges = []
+            orch_status.success(f"Planned AutoGen team — {len(specs)} agent(s)")
+
         agent_names = [s["name"] for s in specs]
-        orch_status.success(f"Planned {len(specs)} agent(s)")
 
         with orch_details:
             if tool_calls:
@@ -149,14 +160,21 @@ for event in stream_run(goal, int(max_rounds)):
                     label = f"`{tc['tool']}({', '.join(f'{k}={v!r}' for k, v in tc['args'].items())})`"
                     with st.expander(label):
                         st.markdown(tc["result"])
-            st.markdown("#### Agent specs")
+
+            if strategy == "langgraph" and edges:
+                st.markdown("#### 🔗 Graph edges")
+                for e in edges:
+                    st.markdown(f"- `{e['from']}` → `{e['to']}`")
+
+            label = "Graph nodes" if strategy == "langgraph" else "Agent specs"
+            st.markdown(f"#### {label}")
             for spec in specs:
                 with st.expander(f"`{spec['name']}` — {spec['role_description']}"):
                     st.markdown(f"**System prompt**\n\n{spec['system_prompt']}")
                     if spec.get("tools"):
                         st.markdown(f"**Tools:** {', '.join(spec['tools'])}")
 
-        # Agent legend in Tab 3
+        # Agent/node legend in Tab 3
         with agents_legend:
             cols = st.columns(len(specs))
             for i, spec in enumerate(specs):
@@ -167,7 +185,8 @@ for event in stream_run(goal, int(max_rounds)):
                     unsafe_allow_html=True,
                 )
 
-        chat_status.info("⏳ Agents in conversation...")
+        label = "pipeline" if strategy == "langgraph" else "conversation"
+        chat_status.info(f"⏳ Agents in {label}...")
 
     elif etype == "agent_message":
         conv_messages.append(event)

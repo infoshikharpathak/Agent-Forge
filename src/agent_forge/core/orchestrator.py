@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 
 from agent_forge.config.settings import ProviderConfig, Settings
 
@@ -22,12 +22,37 @@ class OrchestratorToolCall:
 
 
 class AgentSpec(BaseModel):
-    """Specification for a single agent, written by the Orchestrator."""
+    """Specification for a single agent in an AutoGen debate team."""
 
     name: str
     role_description: str
     system_prompt: str
     tools: list[str] = []
+
+
+class GraphNode(BaseModel):
+    """A single node in a LangGraph execution graph."""
+
+    name: str
+    role_description: str
+    system_prompt: str
+    tools: list[str] = []
+
+
+class GraphEdge(BaseModel):
+    """A directed edge between two nodes in a LangGraph execution graph."""
+
+    model_config = ConfigDict(populate_by_name=True)
+    from_node: str = Field(alias="from")
+    to_node: str = Field(alias="to")
+
+
+class GraphSpec(BaseModel):
+    """Full specification for a LangGraph execution graph."""
+
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    entry: str
 
 
 class Orchestrator:
@@ -47,27 +72,62 @@ class Orchestrator:
             )
     """
 
-    _SYSTEM_BASE = (
-        "You are an agent orchestration planner. Given a high-level goal, decide what "
-        "specialized AI agents are needed to accomplish it and write detailed system "
-        "prompts for each one.\n\n"
-        "Return a JSON object with an 'agents' array. Each element must have:\n"
-        "  - name: short snake_case identifier (e.g. 'data_analyst')\n"
-        "  - role_description: one sentence describing this agent's purpose\n"
-        "  - system_prompt: a detailed, specific system prompt tailored exactly to the "
-        "task — not generic. Include persona, constraints, output format expectations, "
-        "and any domain knowledge the agent needs.\n"
-        "  - tools: list of tool names this agent needs — choose ONLY from the available "
-        "tools listed below. Use an empty list if no tools are needed.\n\n"
-        "Only create agents that are genuinely necessary. Prefer fewer, more capable "
-        "agents over many narrow ones.\n\n"
-        "Available tools:\n{tools_list}"
-    )
+    _SYSTEM_BASE = """\
+You are an agent orchestration planner. Given a goal, choose the best execution \
+strategy and plan a team of AI agents to accomplish it.
+
+STRATEGY CHOICE:
+- autogen: Use when the goal benefits from multiple agents debating and challenging \
+each other — open-ended analysis, opinion questions, "which is better?", or problems \
+where different perspectives improve the answer.
+- langgraph: Use when the goal can be broken into clear sequential or parallel stages \
+— structured pipelines like research → analyse → draft → review, or workflows where \
+each step feeds the next.
+
+RETURN FORMAT — choose exactly one:
+
+For autogen:
+{{
+  "strategy": "autogen",
+  "agents": [
+    {{
+      "name": "snake_case_name",
+      "role_description": "one sentence",
+      "system_prompt": "detailed, specific system prompt",
+      "tools": ["tool_name"]
+    }}
+  ]
+}}
+
+For langgraph:
+{{
+  "strategy": "langgraph",
+  "nodes": [
+    {{
+      "name": "snake_case_name",
+      "role_description": "one sentence",
+      "system_prompt": "detailed, specific system prompt",
+      "tools": ["tool_name"]
+    }}
+  ],
+  "edges": [
+    {{"from": "node_a", "to": "node_b"}}
+  ],
+  "entry": "first_node_name"
+}}
+
+Rules:
+- Nodes with no outgoing edges are terminal — their output feeds the final synthesis.
+- Parallel branches are supported: multiple nodes may share the same predecessor.
+- tools: choose ONLY from the available tools listed below. Empty list if none needed.
+- Only create agents/nodes that are genuinely necessary.
+
+Available tools:
+{tools_list}"""
 
     def _build_system_prompt(self) -> str:
         from agent_forge.tools import list_tools
-        tools = list_tools()
-        tools_str = "\n".join(f"  - {t}" for t in tools)
+        tools_str = "\n".join(f"  - {t}" for t in list_tools())
         return self._SYSTEM_BASE.format(tools_list=tools_str)
 
     def __init__(self, provider: str = "openai", *, model: str | None = None) -> None:
@@ -190,7 +250,14 @@ class Orchestrator:
                 yield text
 
         data = json.loads("".join(chunks))
-        yield [AgentSpec(**spec) for spec in data["agents"]]
+        if data.get("strategy") == "langgraph":
+            yield GraphSpec(
+                nodes=[GraphNode(**n) for n in data["nodes"]],
+                edges=[GraphEdge.model_validate(e) for e in data["edges"]],
+                entry=data["entry"],
+            )
+        else:
+            yield [AgentSpec(**spec) for spec in data.get("agents", [])]
 
     _SYNTHESIZE_SYSTEM = (
         "You are a senior analyst synthesizing the findings from multiple AI agents. "

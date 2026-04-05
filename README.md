@@ -45,11 +45,12 @@ src/agent_forge/
 │   ├── factory.py        # AgentFactory ABC (create / close)
 │   ├── manager.py        # AgentManager — lifecycle + task routing
 │   ├── orchestrator.py   # Orchestrator — plan, judge convergence, synthesize
-│   ├── conversation.py   # AgentConversation — multi-round debate loop
+│   ├── conversation.py   # AgentConversation — multi-round AutoGen debate loop
+│   ├── graph_runner.py   # GraphRunner — LangGraph structured pipeline runner
 │   └── shared_thread.py  # SharedThread — sequential context passing
 ├── backends/
 │   ├── autogen/          # ✅ AutoGen agentchat implementation
-│   ├── langgraph/        # 🔧 stub
+│   ├── langgraph/        # ✅ LangGraph + LangChain implementation
 │   └── anthropic/        # 🔧 stub
 ├── tools/
 │   ├── __init__.py       # Registry — @register, get_tools(), list_tools()
@@ -218,19 +219,45 @@ Import the module once in `tools/__init__.py` and it is available to all agents.
 
 ---
 
+## Execution strategies
+
+The orchestrator automatically picks the right strategy per goal — no configuration needed.
+
+### AutoGen — multi-round debate
+
+Used for open-ended, opinion, or analytical goals where multiple perspectives improve the answer (e.g. *"Should I buy NVDA or TSLA?"*).
+
+- Orchestrator plans a team of agents with complementary roles
+- Agents debate in rounds, each seeing the full conversation history
+- Orchestrator judges convergence after each round; stops when agents agree or `max_rounds` is hit
+- Orchestrator synthesizes the debate into a final report
+
+### LangGraph — structured pipeline
+
+Used for goals with clear sequential or parallel stages (e.g. *"Research the topic, then write a structured report"*).
+
+- Orchestrator defines a graph: nodes (agents) and directed edges
+- Each node receives the goal plus all work completed by upstream nodes
+- Parallel branches are supported — multiple nodes can run from the same predecessor
+- Terminal nodes (no outgoing edges) feed directly into synthesis
+
+The SSE event stream, Streamlit UI, and synthesis phase are identical for both strategies.
+
+---
+
 ## Adding a backend
 
 1. Copy the structure of `src/agent_forge/backends/autogen/`
 2. Implement `BaseAgent` (`run`, `close`) and `AgentFactory` (`create`)
-3. Uncomment the relevant dependency in `pyproject.toml` and re-install
+3. Add the dependency to `pyproject.toml` and re-install
 
-The manager, orchestrator, conversation loop, and API layer are all backend-agnostic — only the factory changes.
+The manager, orchestrator, conversation loop, graph runner, and API layer are all backend-agnostic — only the factory changes.
 
 ---
 
 ## Planned
 
-- LangGraph and Anthropic backend implementations
-- Parallel agent execution (currently sequential within a round)
+- Anthropic backend implementation
+- Conditional/dynamic edges in LangGraph (branching on node output)
 - Additional tools (code executor, news API, etc.)
 - Authentication / multi-user support

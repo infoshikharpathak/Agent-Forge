@@ -27,9 +27,9 @@ dependencies = [
   "wikipedia>=1.4",
   "mcp>=1.0",
 
-  # LangGraph backend (stub — uncomment when implementing)
-  # "langgraph>=0.2.0",
-  # "langchain-openai>=0.1.0",
+  # LangGraph backend
+  "langgraph>=0.2.0",
+  "langchain-openai>=0.1.0",
 
   # Anthropic backend (stub — uncomment when implementing)
   # "anthropic>=0.40.0",

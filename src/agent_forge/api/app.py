@@ -24,9 +24,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent_forge.backends.autogen import AutoGenFactory
+from agent_forge.backends.langgraph import LangGraphFactory
 from agent_forge.core.conversation import AgentConversation, ConversationMessage, StopSignal
+from agent_forge.core.graph_runner import GraphRunner
 from agent_forge.core.manager import AgentManager
-from agent_forge.core.orchestrator import AgentSpec, Orchestrator, OrchestratorToolCall
+from agent_forge.core.orchestrator import AgentSpec, GraphSpec, Orchestrator, OrchestratorToolCall
 from agent_forge.tools.mcp_bridge import MCPBridge
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -93,59 +95,93 @@ async def _pipeline(req: RunRequest) -> AsyncGenerator[tuple[str, str], None]:
 
 
 async def _pipeline_inner(req: RunRequest) -> AsyncGenerator[tuple[str, str], None]:
-    """Core pipeline logic, called inside an active MCPBridge context."""
+    """Core pipeline logic, called inside an active MCPBridge context.
+
+    Branches on the strategy chosen by the Orchestrator:
+    - ``autogen``   → multi-round debate via AgentConversation
+    - ``langgraph`` → structured pipeline via GraphRunner
+    """
     orchestrator = Orchestrator(provider=req.provider)
 
     # Phase 1: Research + plan
-    specs: list[AgentSpec] = []
+    plan: list[AgentSpec] | GraphSpec | None = None
     async for item in orchestrator.plan_stream(req.goal):
         if isinstance(item, OrchestratorToolCall):
             yield "orchestrator_tool_call", json.dumps({
                 "tool": item.tool, "args": item.args, "result": item.result,
             })
+        elif isinstance(item, GraphSpec):
+            plan = item
+            yield "plan_ready", json.dumps({
+                "strategy": "langgraph",
+                "spec": item.model_dump(by_alias=True),
+            })
         elif isinstance(item, list):
-            specs = item
-            yield "plan_ready", json.dumps({"specs": [s.model_dump() for s in specs]})
+            plan = item
+            yield "plan_ready", json.dumps({
+                "strategy": "autogen",
+                "specs": [s.model_dump() for s in item],
+            })
         else:
             yield "plan_chunk", json.dumps({"text": item})
 
-    # Phase 2: Spawn agents
-    factory = AutoGenFactory(provider=req.provider)
-    manager = AgentManager(factory)
-    agents = []
-    for spec in specs:
-        agent = await manager.spawn(
-            role=spec.role_description,
-            name=spec.name,
-            system_message=spec.system_prompt,
-            tools=spec.tools or None,
-        )
-        agents.append(agent)
+    # Phase 2 + 3: Execute — AutoGen debate or LangGraph pipeline
+    context_source: AgentConversation | GraphRunner
 
-    # Phase 3: Conversation
-    conversation = AgentConversation(
-        manager=manager,
-        agents=agents,
-        orchestrator=orchestrator,
-        max_rounds=req.max_rounds,
-    )
-    async for item in conversation.run_stream(req.goal):
-        if isinstance(item, ConversationMessage):
-            yield "agent_message", json.dumps({
-                "agent": item.agent, "content": item.content, "round": item.round,
-            })
-        elif isinstance(item, StopSignal):
-            yield "stop_signal", json.dumps({
-                "reason": item.reason, "stopped_by": item.stopped_by,
-            })
+    if isinstance(plan, GraphSpec):
+        # ── LangGraph path ────────────────────────────────────────────────────
+        factory = LangGraphFactory(provider=req.provider)
+        runner = GraphRunner(factory=factory, spec=plan)
+        async for item in runner.run_stream(req.goal):
+            if isinstance(item, ConversationMessage):
+                yield "agent_message", json.dumps({
+                    "agent": item.agent, "content": item.content, "round": item.round,
+                })
+            elif isinstance(item, StopSignal):
+                yield "stop_signal", json.dumps({
+                    "reason": item.reason, "stopped_by": item.stopped_by,
+                })
+        context_source = runner
+
+    else:
+        # ── AutoGen path (default) ────────────────────────────────────────────
+        specs: list[AgentSpec] = plan or []
+        factory = AutoGenFactory(provider=req.provider)
+        manager = AgentManager(factory)
+        agents = []
+        for spec in specs:
+            agent = await manager.spawn(
+                role=spec.role_description,
+                name=spec.name,
+                system_message=spec.system_prompt,
+                tools=spec.tools or None,
+            )
+            agents.append(agent)
+
+        conversation = AgentConversation(
+            manager=manager,
+            agents=agents,
+            orchestrator=orchestrator,
+            max_rounds=req.max_rounds,
+        )
+        async for item in conversation.run_stream(req.goal):
+            if isinstance(item, ConversationMessage):
+                yield "agent_message", json.dumps({
+                    "agent": item.agent, "content": item.content, "round": item.round,
+                })
+            elif isinstance(item, StopSignal):
+                yield "stop_signal", json.dumps({
+                    "reason": item.reason, "stopped_by": item.stopped_by,
+                })
+        await manager.shutdown()
+        context_source = conversation
 
     # Phase 4: Synthesize
     synthesis_chunks: list[str] = []
-    async for chunk in orchestrator.synthesize_stream(req.goal, conversation.to_context_text()):
+    async for chunk in orchestrator.synthesize_stream(req.goal, context_source.to_context_text()):
         synthesis_chunks.append(chunk)
         yield "synthesis_chunk", json.dumps({"text": chunk})
 
-    await manager.shutdown()
     yield "done", json.dumps({"result": "".join(synthesis_chunks)})
 
 
