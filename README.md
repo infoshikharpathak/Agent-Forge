@@ -1,25 +1,71 @@
 # agent-forge
 
-Framework-agnostic AI agent orchestration scaffold.
+**Framework-agnostic AI agent orchestration.**
 
-A **manager + factory** pattern that lets you spin up, run, and tear down agents on demand — regardless of which AI framework powers them under the hood.
+Send a goal, get back a synthesized report — produced by a dynamically planned team of AI agents that research, debate, and converge on an answer. No agents are predefined; the orchestrator writes every system prompt from scratch for each goal.
+
+---
+
+## How it works
+
+```
+User goal
+   │
+   ▼
+Orchestrator          ← researches the goal (web_search, get_datetime)
+   │                    plans a bespoke team, writes each agent's system prompt
+   ▼
+AgentManager          ← spawns agents via the factory, tears them down after
+   └── AgentFactory   ← abstract: create / run / close agents
+         └── AutoGenFactory  ✅ (LangGraph + Anthropic stubs pending)
+   │
+   ▼
+AgentConversation     ← multi-round debate loop
+   │                    agents see the full conversation history
+   │                    orchestrator judges convergence after each round
+   │                    max_rounds safety cap prevents runaway loops
+   ▼
+Orchestrator.synthesize  ← reads the full debate, writes the final report
+   │
+   ▼
+FastAPI (SSE stream)  ← every event delivered in real time
+   │
+   ▼
+Streamlit UI          ← 3 tabs: Chat · Orchestrator · Agent Activity
+```
+
+---
 
 ## Architecture
 
 ```
-AgentManager          ← orchestrates lifecycle & task routing
-  └── AgentFactory    ← abstract: create / kill agents
-        ├── AutoGenFactory    ✅ working
-        ├── LangGraphFactory  🔧 stub
-        └── AnthropicFactory  🔧 stub
+src/agent_forge/
+├── core/
+│   ├── agent.py          # BaseAgent ABC + AgentStatus enum
+│   ├── factory.py        # AgentFactory ABC (create / close)
+│   ├── manager.py        # AgentManager — lifecycle + task routing
+│   ├── orchestrator.py   # Orchestrator — plan, judge convergence, synthesize
+│   ├── conversation.py   # AgentConversation — multi-round debate loop
+│   └── shared_thread.py  # SharedThread — sequential context passing
+├── backends/
+│   ├── autogen/          # ✅ AutoGen agentchat implementation
+│   ├── langgraph/        # 🔧 stub
+│   └── anthropic/        # 🔧 stub
+├── tools/
+│   ├── __init__.py       # Registry — @register, get_tools(), list_tools()
+│   ├── web.py            # web_search (DuckDuckGo), fetch_url
+│   ├── finance.py        # stock_price, company_financials (yfinance)
+│   └── utility.py        # get_datetime, calculator, wikipedia_search
+├── api/
+│   └── app.py            # FastAPI backend — /health, /run, /run/stream
+├── config/
+│   └── settings.py       # Provider config + env resolution
+└── main.py               # Minimal smoke-test entrypoint
 
-BaseAgent             ← common interface: run(task) / close()
-  ├── AutoGenAgent
-  ├── LangGraphAgent
-  └── AnthropicAgent
+app.py                    # Streamlit frontend (pure SSE consumer)
 ```
 
-The manager and core abstractions know nothing about the backend — swap factories freely.
+---
 
 ## Setup
 
@@ -31,48 +77,114 @@ cp .env.example .env
 # add your OPENAI_API_KEY to .env
 ```
 
-## Run the demo
+---
+
+## Running
+
+**Backend** (required first):
 
 ```bash
-python -m agent_forge
+uvicorn agent_forge.api.app:app --reload --port 8000
 ```
 
-Spawns a `research_analyst` and a `market_strategist`, runs a task on each, releases the analyst mid-session, then shuts down cleanly.
+**Frontend** (in a second terminal):
 
-## Adding a new agent role
+```bash
+streamlit run app.py
+```
 
-Edit `src/agent_forge/backends/autogen/factory.py` and add an entry to `_ROLE_PROMPTS`:
+---
+
+## API
+
+Interactive docs available at `http://localhost:8000/docs` once the backend is running.
+
+### `GET /health`
+
+Liveness probe.
+
+```json
+{"status": "ok"}
+```
+
+### `POST /run`
+
+Blocking. Returns only the final synthesized report.
+
+```json
+// Request
+{"goal": "...", "max_rounds": 3, "provider": "openai"}
+
+// Response
+{"result": "..."}
+```
+
+### `POST /run/stream`
+
+SSE stream. The `detail` query parameter controls how much of the internal pipeline is exposed:
+
+| `detail` | Events included |
+|---|---|
+| `result` (default) | `synthesis_chunk`, `done`, `error` |
+| `orchestration` | + `orchestrator_tool_call`, `plan_chunk`, `plan_ready` |
+| `full` | + `agent_message`, `stop_signal` |
+
+Every SSE frame is a `data:` line containing a JSON object with a `type` field:
+
+```
+data: {"type": "synthesis_chunk", "text": "..."}
+data: {"type": "done", "result": "..."}
+data: {"type": "orchestrator_tool_call", "tool": "web_search", "args": {...}, "result": "..."}
+data: {"type": "plan_ready", "specs": [...]}
+data: {"type": "agent_message", "agent": "Analyst", "content": "...", "round": 1}
+data: {"type": "stop_signal", "reason": "...", "stopped_by": "orchestrator"}
+data: {"type": "error", "message": "..."}
+```
+
+---
+
+## Tool library
+
+Tools are auto-discovered via a `@register` decorator. The orchestrator gets `web_search` and `get_datetime` to stay current before planning. Agents receive whichever tools the orchestrator assigns per goal.
+
+| Tool | Description |
+|---|---|
+| `web_search` | DuckDuckGo search |
+| `fetch_url` | HTTP page fetch |
+| `stock_price` | Live price via yfinance |
+| `company_financials` | Key financial metrics via yfinance |
+| `calculator` | Safe AST-based expression evaluator |
+| `get_datetime` | Current date/time |
+| `wikipedia_search` | Wikipedia article summary |
+
+Adding a tool:
 
 ```python
-"your_role": "You are a ... your system prompt here."
+# src/agent_forge/tools/my_tools.py
+from agent_forge.tools import register
+
+@register("my_tool", description="Does something useful.")
+def my_tool(query: str) -> str:
+    ...
 ```
 
-Then spawn it:
+Import the module once in `tools/__init__.py` and it is available to all agents.
 
-```python
-agent = await manager.spawn(role="your_role", name="my_agent")
-```
+---
 
-## Implementing a stub backend
+## Adding a backend
 
-1. Open `src/agent_forge/backends/langgraph/` (or `anthropic/`)
-2. Follow the `TODO` comments in `agent.py` and `factory.py`
-3. Uncomment the relevant dependency in `pyproject.toml`
-4. Re-install: `pip install -e .`
+1. Copy the structure of `src/agent_forge/backends/autogen/`
+2. Implement `BaseAgent` (`run`, `close`) and `AgentFactory` (`create`)
+3. Uncomment the relevant dependency in `pyproject.toml` and re-install
 
-## Project structure
+The manager, orchestrator, conversation loop, and API layer are all backend-agnostic — only the factory changes.
 
-```
-src/agent_forge/
-├── core/
-│   ├── agent.py       # BaseAgent ABC + AgentStatus
-│   ├── factory.py     # AgentFactory ABC
-│   └── manager.py     # AgentManager (orchestrator)
-├── backends/
-│   ├── autogen/       # ✅ AutoGen implementation
-│   ├── langgraph/     # 🔧 LangGraph stub
-│   └── anthropic/     # 🔧 Anthropic stub
-├── config/
-│   └── settings.py    # Provider config + env resolution
-└── main.py            # Demo entrypoint
-```
+---
+
+## Planned
+
+- LangGraph and Anthropic backend implementations
+- Parallel agent execution (currently sequential within a round)
+- Additional tools (code executor, news API, etc.)
+- Authentication / multi-user support
