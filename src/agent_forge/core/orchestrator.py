@@ -55,17 +55,20 @@ class Orchestrator:
 
     def __init__(self, provider: str = "openai", *, model: str | None = None) -> None:
         self._config: ProviderConfig = Settings.for_provider(provider, model=model)
+
+    def _client(self) -> AsyncOpenAI:
+        """Create a fresh client per call so it binds to the current event loop."""
         kwargs: dict[str, Any] = {"api_key": self._config.api_key}
         if self._config.base_url:
             kwargs["base_url"] = self._config.base_url
-        self._client = AsyncOpenAI(**kwargs)
+        return AsyncOpenAI(**kwargs)
 
     async def plan(self, goal: str) -> list[AgentSpec]:
         """
         Given a goal, return a list of AgentSpecs needed to accomplish it.
         The LLM decides how many agents are needed and writes their system prompts.
         """
-        response = await self._client.chat.completions.create(
+        response = await self._client().chat.completions.create(
             model=self._config.model,
             response_format={"type": "json_object"},
             messages=[
@@ -82,7 +85,7 @@ class Orchestrator:
         Yields str chunks while the LLM is writing the plan, then yields
         list[AgentSpec] as the final item once the response is complete.
         """
-        stream = await self._client.chat.completions.create(
+        stream = await self._client().chat.completions.create(
             model=self._config.model,
             response_format={"type": "json_object"},
             stream=True,
@@ -103,26 +106,52 @@ class Orchestrator:
 
     _SYNTHESIZE_SYSTEM = (
         "You are a senior analyst synthesizing the findings from multiple AI agents. "
-        "Given the original goal and each agent's contribution, produce a single, clean, "
+        "Given the original goal and the full agent conversation, produce a single, clean, "
         "well-structured final response for the user. Eliminate redundancy, resolve any "
         "contradictions, and present the most important insights clearly and concisely."
     )
 
-    async def synthesize_stream(self, goal: str, thread: SharedThread):
+    _STOP_SYSTEM = (
+        "You are a conversation moderator. Given the goal and the conversation history "
+        "between AI agents, decide if the agents have converged enough to stop.\n\n"
+        "Return JSON: {\"converged\": true/false, \"reason\": \"brief explanation\"}\n\n"
+        "Stop if: agents have reached agreement or complementary conclusions, the goal "
+        "is adequately addressed, or further rounds would add little value.\n"
+        "Continue if: there are unresolved disagreements worth exploring, important "
+        "aspects of the goal are uncovered, or agents have raised new questions."
+    )
+
+    async def synthesize_stream(self, goal: str, context: SharedThread | str):
         """
-        Async generator. Reads the full shared thread and streams a clean
-        final synthesis back to the user.
+        Async generator. Reads the full context (SharedThread or pre-formatted
+        conversation text) and streams a clean final synthesis back to the user.
         """
-        context = thread.to_context()
-        stream = await self._client.chat.completions.create(
+        context_text = context if isinstance(context, str) else context.to_context()
+        stream = await self._client().chat.completions.create(
             model=self._config.model,
             stream=True,
             messages=[
                 {"role": "system", "content": self._SYNTHESIZE_SYSTEM},
-                {"role": "user", "content": f"Goal: {goal}\n\n{context}"},
+                {"role": "user", "content": f"Goal: {goal}\n\n{context_text}"},
             ],
         )
         async for chunk in stream:
             text = chunk.choices[0].delta.content or ""
             if text:
                 yield text
+
+    async def should_stop(self, goal: str, history_text: str) -> tuple[bool, str]:
+        """
+        After each conversation round, judge whether agents have converged.
+        Returns (converged: bool, reason: str).
+        """
+        response = await self._client().chat.completions.create(
+            model=self._config.model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": self._STOP_SYSTEM},
+                {"role": "user", "content": f"Goal: {goal}\n\n{history_text}"},
+            ],
+        )
+        data = json.loads(response.choices[0].message.content)
+        return data["converged"], data["reason"]

@@ -14,9 +14,9 @@ import threading
 import streamlit as st
 
 from agent_forge.backends.autogen import AutoGenFactory
+from agent_forge.core.conversation import AgentConversation, ConversationMessage, StopSignal
 from agent_forge.core.manager import AgentManager
 from agent_forge.core.orchestrator import AgentSpec, Orchestrator
-from agent_forge.core.shared_thread import SharedThread
 
 # ── Async helpers ─────────────────────────────────────────────────────────────
 
@@ -74,6 +74,47 @@ def iter_async_stream(async_gen_factory):
     t.join()
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+# One color per agent (cycles if more than 6)
+_AGENT_COLORS = ["#4F8EF7", "#F7874F", "#4FD18C", "#F7CF4F", "#C44FF7", "#F74F6E"]
+
+def _agent_color(name: str, specs: list[AgentSpec]) -> str:
+    names = [s.name for s in specs]
+    idx = names.index(name) if name in names else 0
+    return _AGENT_COLORS[idx % len(_AGENT_COLORS)]
+
+
+def render_conversation(
+    messages: list[ConversationMessage],
+    specs: list[AgentSpec],
+    stop: StopSignal | None = None,
+) -> str:
+    """Render the conversation as markdown for st.markdown()."""
+    if not messages:
+        return ""
+
+    md_parts = []
+    current_round = 0
+
+    for msg in messages:
+        if msg.round != current_round:
+            current_round = msg.round
+            md_parts.append(f"**── Round {current_round} ──**")
+
+        color = _agent_color(msg.agent, specs)
+        md_parts.append(
+            f'<span style="color:{color}; font-weight:600">{msg.agent}</span>\n\n'
+            f"{msg.content}"
+        )
+
+    if stop:
+        icon = "✅" if stop.stopped_by == "orchestrator" else "⏹️"
+        md_parts.append(f"---\n{icon} *{stop.reason}*")
+
+    return "\n\n---\n\n".join(md_parts)
+
+
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="agent-forge", page_icon="🔨", layout="wide")
@@ -91,7 +132,11 @@ with tab_chat:
         "and produce a concise investment brief."
     )
     goal = st.text_area("Goal", value=DEFAULT_GOAL, height=80)
-    run_btn = st.button("▶ Run", type="primary", disabled=not goal.strip())
+    col_btn, col_rounds = st.columns([3, 1])
+    with col_btn:
+        run_btn = st.button("▶ Run", type="primary", disabled=not goal.strip())
+    with col_rounds:
+        max_rounds = st.number_input("Max rounds", min_value=1, max_value=10, value=3)
     st.divider()
     chat_status = st.empty()
     final_report = st.empty()
@@ -106,12 +151,9 @@ with tab_orch:
 # ── Tab 3: Agent Activity ─────────────────────────────────────────────────────
 
 with tab_agents:
-    agents_cards_area = st.container()
+    agents_legend = st.empty()
     st.divider()
-    st.markdown("#### 💬 Shared Thread")
-    thread_display = st.empty()
-
-# ── Stop here until Run is clicked ───────────────────────────────────────────
+    conv_display = st.empty()
 
 if not run_btn:
     st.stop()
@@ -123,7 +165,6 @@ orch_status.info("Planning agents for your goal...")
 
 full_text = ""
 specs: list[AgentSpec] = []
-
 orchestrator = Orchestrator(provider="openai")
 
 for item in iter_async_stream(lambda: orchestrator.plan_stream(goal)):
@@ -144,63 +185,76 @@ with orch_specs_area:
             if spec.tools:
                 st.markdown(f"**Tools:** {', '.join(spec.tools)}")
 
-# ── Step 2: Create agent cards → Tab 3 ───────────────────────────────────────
+# ── Step 2: Show agent legend → Tab 3 ────────────────────────────────────────
 
-status_slots: dict[str, st.delta_generator.DeltaGenerator] = {}
-result_slots: dict[str, st.delta_generator.DeltaGenerator] = {}
+with agents_legend:
+    cols = st.columns(len(specs))
+    for i, spec in enumerate(specs):
+        color = _agent_color(spec.name, specs)
+        cols[i].markdown(
+            f'<span style="color:{color}; font-weight:700">● {spec.name}</span><br>'
+            f'<span style="font-size:0.85em">{spec.role_description}</span>',
+            unsafe_allow_html=True,
+        )
 
-with agents_cards_area:
-    st.markdown("#### Agent outputs")
-    for spec in specs:
-        with st.container(border=True):
-            st.markdown(f"**`{spec.name}`**  \n{spec.role_description}")
-            status_slots[spec.name] = st.empty()
-            result_slots[spec.name] = st.empty()
-            status_slots[spec.name].info("Waiting...")
+# ── Step 3: Spawn agents ──────────────────────────────────────────────────────
 
-# ── Step 3: Spawn + run agents ────────────────────────────────────────────────
-
-chat_status.info("⏳ Agents running...")
+chat_status.info("⏳ Spawning agents...")
 
 factory = AutoGenFactory(provider="openai")
 manager = AgentManager(factory)
-thread = SharedThread()
 
-agents_map: dict[str, tuple[AgentSpec, object]] = {}
+agents = []
 for spec in specs:
     agent = run_async(manager.spawn(
         role=spec.role_description,
         name=spec.name,
         system_message=spec.system_prompt,
     ))
-    agents_map[spec.name] = (spec, agent)
+    agents.append(agent)
 
-for spec_name, (spec, agent) in agents_map.items():
-    status_slots[spec_name].warning("⚙️ Running...")
-    result = run_async(manager.run_task(agent.agent_id, goal, thread=thread))
-    status_slots[spec_name].success("✅ Done")
-    result_slots[spec_name].markdown(result)
+# ── Step 4: Run conversation → Tab 3 ─────────────────────────────────────────
 
-    # Update shared thread display after each agent
-    thread_display.markdown(
-        "\n\n---\n\n".join(
-            f"**`{msg.agent}`**\n\n{msg.content}"
-            for msg in thread.messages()
+chat_status.info("⏳ Agents in conversation...")
+
+conversation = AgentConversation(
+    manager=manager,
+    agents=agents,
+    orchestrator=orchestrator,
+    max_rounds=int(max_rounds),
+)
+
+conv_messages: list[ConversationMessage] = []
+stop_signal: StopSignal | None = None
+
+for item in iter_async_stream(lambda: conversation.run_stream(goal)):
+    if isinstance(item, ConversationMessage):
+        conv_messages.append(item)
+        conv_display.markdown(
+            render_conversation(conv_messages, specs),
+            unsafe_allow_html=True,
         )
-    )
+    elif isinstance(item, StopSignal):
+        stop_signal = item
+        conv_display.markdown(
+            render_conversation(conv_messages, specs, stop_signal),
+            unsafe_allow_html=True,
+        )
 
-# ── Step 4: Synthesize → Tab 1 ────────────────────────────────────────────────
+# ── Step 5: Synthesize → Tab 1 ────────────────────────────────────────────────
 
 chat_status.info("⏳ Synthesizing final report...")
 
 synthesis_text = ""
-for chunk in iter_async_stream(lambda: orchestrator.synthesize_stream(goal, thread)):
+context_text = conversation.to_context_text()
+
+for chunk in iter_async_stream(lambda: orchestrator.synthesize_stream(goal, context_text)):
     synthesis_text += chunk
     final_report.markdown(synthesis_text + "▌")
 
 final_report.markdown(synthesis_text)
 chat_status.success("✅ Done")
 
-# ── Step 5: Shutdown ──────────────────────────────────────────────────────────
+# ── Step 6: Shutdown ──────────────────────────────────────────────────────────
 
 run_async(manager.shutdown())
