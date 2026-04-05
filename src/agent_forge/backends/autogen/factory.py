@@ -46,16 +46,19 @@ class AutoGenFactory(AgentFactory):
         name: str = "agent",
         *,
         system_message: str,
-        tools: list[Any] | None = None,
+        tools: list[str] | None = None,
         **kwargs: Any,
     ) -> AutoGenAgent:
+        from agent_forge.tools import get_tools
+
         agent_id = str(uuid.uuid4())
+        resolved_tools = get_tools(tools) if tools else []
 
         native = AssistantAgent(
             name=name,
             model_client=self._build_model_client(),
             system_message=system_message,
-            tools=tools or [],
+            tools=resolved_tools,
         )
 
         agent = AutoGenAgent(agent_id=agent_id, name=name, role=role, native=native)

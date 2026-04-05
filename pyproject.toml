@@ -17,6 +17,11 @@ dependencies = [
   # UI
   "streamlit>=1.28",
 
+  # Tools
+  "ddgs>=0.1",
+  "yfinance>=0.2",
+  "wikipedia>=1.4",
+
   # LangGraph backend (stub — uncomment when implementing)
   # "langgraph>=0.2.0",
   # "langchain-openai>=0.1.0",

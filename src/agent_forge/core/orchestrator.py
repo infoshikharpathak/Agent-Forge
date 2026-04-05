@@ -38,7 +38,7 @@ class Orchestrator:
             )
     """
 
-    _SYSTEM = (
+    _SYSTEM_BASE = (
         "You are an agent orchestration planner. Given a high-level goal, decide what "
         "specialized AI agents are needed to accomplish it and write detailed system "
         "prompts for each one.\n\n"
@@ -48,10 +48,18 @@ class Orchestrator:
         "  - system_prompt: a detailed, specific system prompt tailored exactly to the "
         "task — not generic. Include persona, constraints, output format expectations, "
         "and any domain knowledge the agent needs.\n"
-        "  - tools: list of tool names this agent needs (empty list if none)\n\n"
+        "  - tools: list of tool names this agent needs — choose ONLY from the available "
+        "tools listed below. Use an empty list if no tools are needed.\n\n"
         "Only create agents that are genuinely necessary. Prefer fewer, more capable "
-        "agents over many narrow ones."
+        "agents over many narrow ones.\n\n"
+        "Available tools:\n{tools_list}"
     )
+
+    def _build_system_prompt(self) -> str:
+        from agent_forge.tools import list_tools
+        tools = list_tools()
+        tools_str = "\n".join(f"  - {t}" for t in tools)
+        return self._SYSTEM_BASE.format(tools_list=tools_str)
 
     def __init__(self, provider: str = "openai", *, model: str | None = None) -> None:
         self._config: ProviderConfig = Settings.for_provider(provider, model=model)
@@ -72,7 +80,7 @@ class Orchestrator:
             model=self._config.model,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": self._SYSTEM},
+                {"role": "system", "content": self._build_system_prompt()},
                 {"role": "user", "content": f"Goal: {goal}"},
             ],
         )
@@ -90,7 +98,7 @@ class Orchestrator:
             response_format={"type": "json_object"},
             stream=True,
             messages=[
-                {"role": "system", "content": self._SYSTEM},
+                {"role": "system", "content": self._build_system_prompt()},
                 {"role": "user", "content": f"Goal: {goal}"},
             ],
         )
