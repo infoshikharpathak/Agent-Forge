@@ -20,13 +20,16 @@ API_URL = "http://localhost:8000"
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 def stream_run(goal: str, max_rounds: int):
-    """Consume SSE events from POST /run/stream."""
+    """Consume live SSE events from POST /run/stream."""
     with httpx.Client(timeout=300) as client:
         with client.stream(
             "POST",
             f"{API_URL}/run/stream",
+            params={"detail": "full"},
+            headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
             json={"goal": goal, "max_rounds": max_rounds},
         ) as resp:
+            resp.raise_for_status()
             for line in resp.iter_lines():
                 if line.startswith("data: "):
                     yield json.loads(line[6:])
@@ -49,23 +52,32 @@ def _agent_color(name: str, agent_names: list[str]) -> str:
 
 
 def render_conversation(messages: list[dict], agent_names: list[str], stop: dict | None) -> str:
+    """Render all agent messages as a single pure-HTML string.
+
+    Avoids mixing Markdown ``---`` separators with HTML ``<span>`` tags,
+    which causes the Markdown parser to silently drop intermediate sections.
+    """
     if not messages:
         return ""
-    md_parts = []
+    parts = []
     current_round = 0
     for msg in messages:
         if msg["round"] != current_round:
             current_round = msg["round"]
-            md_parts.append(f"**── Round {current_round} ──**")
+            parts.append(f'<p><strong>── Round {current_round} ──</strong></p>')
         color = _agent_color(msg["agent"], agent_names)
-        md_parts.append(
-            f'<span style="color:{color}; font-weight:600">{msg["agent"]}</span>\n\n'
-            f'{msg["content"]}'
+        content_html = msg["content"].replace("\n", "<br>")
+        parts.append(
+            f'<div style="margin-bottom:1em">'
+            f'<span style="color:{color}; font-weight:600">{msg["agent"]}</span><br>'
+            f'<span>{content_html}</span>'
+            f'</div>'
+            f'<hr style="border:none;border-top:1px solid #333;margin:0.5em 0"/>'
         )
     if stop:
         icon = "✅" if stop["stopped_by"] == "orchestrator" else "⏹️"
-        md_parts.append(f"---\n{icon} *{stop['reason']}*")
-    return "\n\n---\n\n".join(md_parts)
+        parts.append(f'<p>{icon} <em>{stop["reason"]}</em></p>')
+    return "".join(parts)
 
 
 # ── Page config ───────────────────────────────────────────────────────────────

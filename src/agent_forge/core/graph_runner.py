@@ -73,12 +73,14 @@ class GraphRunner:
             agents[node.name] = agent
 
         # ── Build node functions ──────────────────────────────────────────────
+        node_task_map = {n.name: n.task_prompt for n in self._spec.nodes}
+
         def _make_node_fn(agent: Any, node_name: str):
             async def node_fn(state: _AgentState) -> dict:
+                task = node_task_map[node_name]
                 context = "\n\n".join(
                     f"{m['agent']}:\n{m['content']}" for m in state["messages"]
                 )
-                task = state["goal"]
                 if context:
                     task += f"\n\nWork completed so far:\n{context}"
                 content = await agent.run(task)
@@ -88,31 +90,49 @@ class GraphRunner:
         for node in self._spec.nodes:
             workflow.add_node(node.name, _make_node_fn(agents[node.name], node.name))
 
-        # ── Add edges ─────────────────────────────────────────────────────────
-        for edge in self._spec.edges:
-            workflow.add_edge(edge.from_node, edge.to_node)
+        if not self._spec.edges:
+            # ── Parallel independent nodes ────────────────────────────────────
+            # No edges means agents are fully independent — each receives its
+            # own task_prompt with no shared context from other nodes.
+            node_map = {n.name: n for n in self._spec.nodes}
+            for node in self._spec.nodes:
+                task = node_map[node.name].task_prompt
+                content = await agents[node.name].run(task)
+                msg = {"agent": node.name, "content": content}
+                self._messages.append(msg)
+                yield ConversationMessage(agent=node.name, content=content, round=1)
 
-        # Wire terminal nodes (no outgoing edge) → END
-        nodes_with_outgoing = {e.from_node for e in self._spec.edges}
-        for node in self._spec.nodes:
-            if node.name not in nodes_with_outgoing:
-                workflow.add_edge(node.name, END)
+        else:
+            # ── Sequential pipeline via LangGraph ─────────────────────────────
+            # Edges define the execution order; each node receives accumulated
+            # context from upstream nodes.
+            for edge in self._spec.edges:
+                workflow.add_edge(edge.from_node, edge.to_node)
 
-        workflow.set_entry_point(self._spec.entry)
-        graph = workflow.compile()
+            # Wire terminal nodes (no outgoing edge) → END
+            nodes_with_outgoing = {e.from_node for e in self._spec.edges}
+            for node in self._spec.nodes:
+                if node.name not in nodes_with_outgoing:
+                    workflow.add_edge(node.name, END)
 
-        # ── Stream execution ──────────────────────────────────────────────────
-        async for event in graph.astream({"goal": goal, "messages": []}):
-            for node_name, state_update in event.items():
-                if node_name == "__end__":
-                    continue
-                for msg in state_update.get("messages", []):
-                    self._messages.append(msg)
-                    yield ConversationMessage(
-                        agent=msg["agent"],
-                        content=msg["content"],
-                        round=1,
-                    )
+            workflow.set_entry_point(self._spec.entry)
+            graph = workflow.compile()
+
+            # stream_mode="updates" yields {node_name: node_output} per step,
+            # not the full state snapshot — required for correct node extraction.
+            async for event in graph.astream(
+                {"goal": goal, "messages": []}, stream_mode="updates"
+            ):
+                for node_name, state_update in event.items():
+                    if node_name == "__end__":
+                        continue
+                    for msg in state_update.get("messages", []):
+                        self._messages.append(msg)
+                        yield ConversationMessage(
+                            agent=msg["agent"],
+                            content=msg["content"],
+                            round=1,
+                        )
 
         # Clean up agents
         for agent in agents.values():

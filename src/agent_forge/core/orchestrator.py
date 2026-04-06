@@ -36,6 +36,7 @@ class GraphNode(BaseModel):
     name: str
     role_description: str
     system_prompt: str
+    task_prompt: str
     tools: list[str] = []
 
 
@@ -76,13 +77,17 @@ class Orchestrator:
 You are an agent orchestration planner. Given a goal, choose the best execution \
 strategy and plan a team of AI agents to accomplish it.
 
-STRATEGY CHOICE:
-- autogen: Use when the goal benefits from multiple agents debating and challenging \
-each other — open-ended analysis, opinion questions, "which is better?", or problems \
-where different perspectives improve the answer.
-- langgraph: Use when the goal can be broken into clear sequential or parallel stages \
-— structured pipelines like research → analyse → draft → review, or workflows where \
-each step feeds the next.
+STRATEGY CHOICE — default to autogen unless langgraph is clearly better:
+- autogen: Use for the vast majority of goals — analysis, research, tool use, \
+comparisons, opinions, or any problem where agents benefit from seeing each \
+other's output and building on it. Agents debate and challenge each other until \
+they converge on a good answer.
+- langgraph: Use ONLY when tasks are truly independent and parallel — e.g. \
+simultaneously analysing 5 separate companies where each agent works in isolation \
+and does NOT need to see what the others found. Or when stages are pure \
+transformations with no benefit from shared context (translate → reformat). \
+Do NOT use langgraph just because a task sounds "sequential" — if agents would \
+benefit from seeing each other's research or analysis, use autogen.
 
 RETURN a JSON object — choose exactly one of these formats:
 
@@ -106,7 +111,8 @@ For langgraph:
     {{
       "name": "snake_case_name",
       "role_description": "one sentence",
-      "system_prompt": "detailed, specific system prompt",
+      "system_prompt": "detailed persona, constraints, and domain knowledge for this node",
+      "task_prompt": "the specific task this node must perform — tailored to its exact job, not the generic goal",
       "tools": ["tool_name"]
     }}
   ],
@@ -117,8 +123,10 @@ For langgraph:
 }}
 
 Rules:
-- Nodes with no outgoing edges are terminal — their output feeds the final synthesis.
-- Parallel branches are supported: multiple nodes may share the same predecessor.
+- For langgraph: if nodes are fully independent (e.g. each analyses a different company
+  with no need to see each other's output), leave "edges" as an empty array []. Each
+  node will receive only the goal — no shared context. If stages must build on each
+  other (e.g. researcher feeds analyst), define edges explicitly.
 - tools: choose ONLY from the available tools listed below. Empty list if none needed.
 - Only create agents/nodes that are genuinely necessary.
 
