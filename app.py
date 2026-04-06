@@ -176,7 +176,10 @@ for event in stream_run(goal, int(max_rounds)):
             if strategy == "langgraph" and edges:
                 st.markdown("#### 🔗 Graph edges")
                 for e in edges:
-                    st.markdown(f"- `{e['from']}` → `{e['to']}`")
+                    label = f"- `{e['from']}` → `{e['to']}`"
+                    if e.get("condition"):
+                        label += f" *(if {e['condition']})*"
+                    st.markdown(label)
 
             label = "Graph nodes" if strategy == "langgraph" else "Agent specs"
             st.markdown(f"#### {label}")

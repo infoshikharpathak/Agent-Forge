@@ -41,11 +41,18 @@ class GraphNode(BaseModel):
 
 
 class GraphEdge(BaseModel):
-    """A directed edge between two nodes in a LangGraph execution graph."""
+    """A directed edge between two nodes in a LangGraph execution graph.
+
+    Set ``condition`` and ``condition_key`` to make the edge conditional.
+    The source node's system_prompt must then instruct it to end its response
+    with ``[ROUTE: <condition_key>]`` so the runner can extract the route.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
     from_node: str = Field(alias="from")
     to_node: str = Field(alias="to")
+    condition: str | None = None
+    condition_key: str | None = None
 
 
 class GraphSpec(BaseModel):
@@ -77,17 +84,17 @@ class Orchestrator:
 You are an agent orchestration planner. Given a goal, choose the best execution \
 strategy and plan a team of AI agents to accomplish it.
 
-STRATEGY CHOICE — default to autogen unless langgraph is clearly better:
-- autogen: Use for the vast majority of goals — analysis, research, tool use, \
-comparisons, opinions, or any problem where agents benefit from seeing each \
-other's output and building on it. Agents debate and challenge each other until \
-they converge on a good answer.
-- langgraph: Use ONLY when tasks are truly independent and parallel — e.g. \
-simultaneously analysing 5 separate companies where each agent works in isolation \
-and does NOT need to see what the others found. Or when stages are pure \
-transformations with no benefit from shared context (translate → reformat). \
-Do NOT use langgraph just because a task sounds "sequential" — if agents would \
-benefit from seeing each other's research or analysis, use autogen.
+STRATEGY CHOICE:
+- autogen: Use when the goal benefits from agents debating, challenging each other, \
+and converging on an answer — open-ended analysis, opinions, comparisons, or problems \
+where different perspectives improve the result.
+- langgraph: Use when the goal has a clear deterministic structure. Two valid cases: \
+(1) PARALLEL INDEPENDENT — multiple agents each handle a completely separate sub-task \
+with no need to see each other's output (e.g. analyse 5 companies simultaneously); \
+(2) CONDITIONAL PIPELINE — a node's output determines which path to take next \
+(e.g. assess risk first, then route to crisis analysis if HIGH or recommendation if LOW). \
+Do NOT use langgraph just because a task sounds sequential — if agents benefit from \
+debating each other's findings, use autogen.
 
 RETURN a JSON object — choose exactly one of these formats:
 
@@ -117,7 +124,9 @@ For langgraph:
     }}
   ],
   "edges": [
-    {{"from": "node_a", "to": "node_b"}}
+    {{"from": "node_a", "to": "node_b"}},
+    {{"from": "node_a", "to": "node_c", "condition": "if risk is HIGH", "condition_key": "HIGH_RISK"}},
+    {{"from": "node_a", "to": "node_d", "condition": "if risk is LOW", "condition_key": "LOW_RISK"}}
   ],
   "entry": "first_node_name"
 }}
@@ -125,10 +134,18 @@ For langgraph:
 Rules:
 - For langgraph: if nodes are fully independent (e.g. each analyses a different company
   with no need to see each other's output), leave "edges" as an empty array []. Each
-  node will receive only the goal — no shared context. If stages must build on each
-  other (e.g. researcher feeds analyst), define edges explicitly.
+  node will receive only its own task_prompt — no shared context. If stages must build
+  on each other (e.g. researcher feeds analyst), define edges explicitly.
+- Conditional edges: add "condition" (human-readable) and "condition_key" (short
+  uppercase token e.g. "HIGH_RISK") to an edge to make it conditional. When a node
+  has conditional outgoing edges, its system_prompt MUST end with routing instructions
+  like: "End your response with [ROUTE: HIGH_RISK] if ... or [ROUTE: LOW_RISK] if ...".
+  Include one unconditional edge from the same node as the fallback.
 - tools: choose ONLY from the available tools listed below. Empty list if none needed.
 - Only create agents/nodes that are genuinely necessary.
+- IMPORTANT: use the current date from the research context when writing system_prompt
+  and task_prompt — never hardcode a specific year. Reference "latest", "current", or
+  the actual date from context instead.
 
 Available tools:
 {tools_list}"""
@@ -177,16 +194,24 @@ Available tools:
     async def _research(self, goal: str) -> tuple[list[OrchestratorToolCall], str]:
         """
         Run a tool-calling loop to gather current context for the goal.
+        Always calls get_datetime first so the planner always knows the exact
+        current date — prevents agents from being written with hardcoded years.
         Returns (tool_calls_made, research_summary_text).
         """
         from agent_forge.tools import get_tool, get_openai_schemas
+
+        # Always fetch the current date first — unconditionally
+        get_datetime = get_tool("get_datetime")
+        current_datetime = get_datetime()
+        tool_calls_made: list[OrchestratorToolCall] = [
+            OrchestratorToolCall(tool="get_datetime", args={}, result=current_datetime)
+        ]
 
         tool_schemas = get_openai_schemas(self._ORCHESTRATOR_TOOLS)
         messages: list[dict] = [
             {"role": "system", "content": self._RESEARCH_SYSTEM},
             {"role": "user", "content": f"Gather current context for: {goal}"},
         ]
-        tool_calls_made: list[OrchestratorToolCall] = []
 
         for _ in range(4):  # safety cap on rounds
             response = await self._client().chat.completions.create(

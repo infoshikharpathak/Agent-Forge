@@ -2,7 +2,7 @@
 
 **Framework-agnostic AI agent orchestration.**
 
-Send a goal, get back a synthesized report — produced by a dynamically planned team of AI agents that research, debate, and converge on an answer. No agents are predefined; the orchestrator writes every system prompt from scratch for each goal.
+Send a goal, get back a synthesized report — produced by a dynamically planned team of AI agents that research, debate, and converge on an answer. No agents are predefined; the orchestrator writes every system prompt and task prompt from scratch for each goal.
 
 ---
 
@@ -12,13 +12,13 @@ Send a goal, get back a synthesized report — produced by a dynamically planned
 User goal
    │
    ▼
-Orchestrator          ← researches the goal (web_search, get_datetime)
-   │                    chooses execution strategy, writes agent system prompts
+Orchestrator          ← researches the goal (get_datetime always, web_search as needed)
+   │                    chooses execution strategy, writes agent system + task prompts
    │
    ├─── strategy: autogen ────────────────────────────────────────────────────┐
    │                                                                           │
    │    AgentManager + AutoGenFactory                                          │
-   │      └── spawn N debate agents                                            │
+   │      └── spawn N debate agents (each with a tailored system prompt)      │
    │                                                                           │
    │    AgentConversation   ← multi-round debate loop                          │
    │      agents see full conversation history                                 │
@@ -31,8 +31,17 @@ Orchestrator          ← researches the goal (web_search, get_datetime)
           └── spawn one agent per graph node                                   │
                                                                                │
         GraphRunner   ← builds a LangGraph StateGraph from the spec            │
-          nodes execute in order (sequential or parallel branches)             │
-          each node receives the goal + all upstream output as context         │
+                                                                               │
+          mode A — parallel independent (edges: []):                           │
+            each node receives only its own task_prompt                        │
+            nodes run in isolation, no shared context                          │
+                                                                               │
+          mode B — sequential / conditional pipeline (edges defined):          │
+            nodes execute in order defined by edges                            │
+            each node receives the goal + all upstream output as context       │
+            conditional edges: node embeds [ROUTE: KEY] in response            │
+            GraphRunner extracts key, routes to matching next node             │
+            tag stripped from content before display / synthesis               │
                                                                                │
    ┌───────────────────────────────────────────────────────────────────────────┘
    │
@@ -44,7 +53,7 @@ FastAPI (SSE stream)  ← every event streamed in real time
    │                    detail=result | orchestration | full
    ▼
 Streamlit UI          ← 3 tabs: Chat · Orchestrator · Agent Activity
-                         Orchestrator tab shows graph edges for langgraph runs
+                         Orchestrator tab shows graph edges and conditions
 ```
 
 ---
@@ -69,7 +78,8 @@ src/agent_forge/
 │   ├── __init__.py       # Registry — @register, get_tools(), list_tools()
 │   ├── web.py            # web_search (DuckDuckGo), fetch_url
 │   ├── finance.py        # stock_price, company_financials (yfinance)
-│   └── utility.py        # get_datetime, calculator, wikipedia_search
+│   ├── utility.py        # get_datetime, calculator, wikipedia_search
+│   └── mcp_bridge.py     # MCPBridge — connects MCP servers, registers tools
 ├── api/
 │   └── app.py            # FastAPI backend — /health, /run, /run/stream
 ├── config/
@@ -77,6 +87,8 @@ src/agent_forge/
 └── main.py               # Minimal smoke-test entrypoint
 
 app.py                    # Streamlit frontend (pure SSE consumer)
+mcp_servers.json          # MCP server config (gitignored, create from example)
+mcp_servers.example.json  # Example MCP server config
 ```
 
 ---
@@ -149,8 +161,10 @@ Every SSE frame is a `data:` line containing a JSON object with a `type` field:
 data: {"type": "synthesis_chunk", "text": "..."}
 data: {"type": "done", "result": "..."}
 data: {"type": "orchestrator_tool_call", "tool": "web_search", "args": {...}, "result": "..."}
-data: {"type": "plan_ready", "specs": [...]}
-data: {"type": "agent_message", "agent": "Analyst", "content": "...", "round": 1}
+data: {"type": "plan_chunk", "text": "..."}
+data: {"type": "plan_ready", "strategy": "autogen", "specs": [...]}
+data: {"type": "plan_ready", "strategy": "langgraph", "spec": {"nodes": [...], "edges": [...], "entry": "..."}}
+data: {"type": "agent_message", "agent": "analyst", "content": "...", "round": 1}
 data: {"type": "stop_signal", "reason": "...", "stopped_by": "orchestrator"}
 data: {"type": "error", "message": "..."}
 ```
@@ -205,7 +219,7 @@ That's it — no Python code to write.
 
 ## Tool library
 
-Tools are auto-discovered via a `@register` decorator. The orchestrator gets `web_search` and `get_datetime` to stay current before planning. Agents receive whichever tools the orchestrator assigns per goal.
+Tools are auto-discovered via a `@register` decorator. The orchestrator always calls `get_datetime` before planning so agent prompts never hardcode a year. Agents receive whichever tools the orchestrator assigns per goal.
 
 | Tool | Description |
 |---|---|
@@ -241,18 +255,22 @@ The orchestrator automatically picks the right strategy per goal — no configur
 Used for open-ended, opinion, or analytical goals where multiple perspectives improve the answer (e.g. *"Should I buy NVDA or TSLA?"*).
 
 - Orchestrator plans a team of agents with complementary roles
+- Each agent gets a tailored system prompt written for the specific goal
 - Agents debate in rounds, each seeing the full conversation history
 - Orchestrator judges convergence after each round; stops when agents agree or `max_rounds` is hit
 - Orchestrator synthesizes the debate into a final report
 
 ### LangGraph — structured pipeline
 
-Used for goals with clear sequential or parallel stages (e.g. *"Research the topic, then write a structured report"*).
+Used when the goal has a clear deterministic structure. Two valid cases:
 
-- Orchestrator defines a graph: nodes (agents) and directed edges
-- Each node receives the goal plus all work completed by upstream nodes
-- Parallel branches are supported — multiple nodes can run from the same predecessor
-- Terminal nodes (no outgoing edges) feed directly into synthesis
+**Parallel independent** (no edges): Multiple agents each handle a completely separate sub-task with no need to see each other's output (e.g. analyse 5 companies simultaneously). Each node receives only its own `task_prompt`.
+
+**Sequential / conditional pipeline** (edges defined): Stages build on each other, or a node's output determines which path to take next.
+
+- Orchestrator defines a graph: nodes (agents with system + task prompts) and directed edges
+- Each node receives the goal plus all work completed by upstream nodes as context
+- **Conditional edges**: a node signals its route by ending its response with `[ROUTE: KEY]`. GraphRunner extracts the key, routes to the matching next node, and strips the tag before display or synthesis. If no valid tag is found, falls back to the unconditional edge (or END).
 
 The SSE event stream, Streamlit UI, and synthesis phase are identical for both strategies.
 
@@ -271,6 +289,5 @@ The manager, orchestrator, conversation loop, graph runner, and API layer are al
 ## Planned
 
 - Anthropic backend implementation
-- Conditional/dynamic edges in LangGraph (branching on node output)
 - Additional tools (code executor, news API, etc.)
 - Authentication / multi-user support

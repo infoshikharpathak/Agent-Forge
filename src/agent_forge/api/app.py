@@ -19,7 +19,7 @@ import logging
 from enum import Enum
 from typing import AsyncGenerator
 
-log = logging.getLogger("agent_forge")
+log = logging.getLogger("uvicorn.error")
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
