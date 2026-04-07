@@ -12,8 +12,18 @@ Send a goal, get back a synthesized report — produced by a dynamically planned
 User goal
    │
    ▼
-Orchestrator          ← researches the goal (get_datetime always, web_search as needed)
-   │                    chooses execution strategy, writes agent system + task prompts
+[Guardrail 1: Goal Clarity]   ← rewrites vague goals into specific, actionable ones
+   │                              emits goal_clarified (was_changed + reasoning)
+   │
+   ▼
+Orchestrator research         ← get_datetime (always) + web_search as needed
+   │                              runs ONCE — not repeated on plan retries
+   │
+   ▼
+[Guardrail 2: Plan Validator] ← up to 3 attempts
+   │  checks: coverage, role distinctness, prompt specificity, strategy fit
+   │  rejects bad plans with feedback → orchestrator replans
+   │  emits plan_validation per attempt
    │
    ├─── strategy: autogen ────────────────────────────────────────────────────┐
    │                                                                           │
@@ -46,14 +56,25 @@ Orchestrator          ← researches the goal (get_datetime always, web_search a
    ┌───────────────────────────────────────────────────────────────────────────┘
    │
    ▼
-Orchestrator.synthesize  ← reads full execution output, writes final report
+Orchestrator.synthesize       ← reads full execution output, writes final report
+   │
+   ▼
+[Guardrail 3: Quality Check]  ← up to 1 retry
+   │  checks: does the report directly answer the goal?
+   │  synthesis buffered internally — only streamed after it passes
+   │  re-synthesizes with feedback if it fails
+   │  emits quality_check per attempt
+   │
+   ▼
+[Guardrail 4: Grounding Check] ← verifies every claim is backed by agent conversation
+   │  flags unsupported claims / hallucinations
+   │  emits grounding_check (grounded + unsupported_claims list)
    │
    ▼
 FastAPI (SSE stream)  ← every event streamed in real time
    │                    detail=result | orchestration | full
    ▼
-Streamlit UI          ← 3 tabs: Chat · Orchestrator · Agent Activity
-                         Orchestrator tab shows graph edges and conditions
+Streamlit UI          ← 4 tabs: Chat · Orchestrator · Agent Activity · Quality Guardrails
 ```
 
 ---
@@ -86,7 +107,7 @@ src/agent_forge/
 │   └── settings.py       # Provider config + env resolution
 └── main.py               # Minimal smoke-test entrypoint
 
-app.py                    # Streamlit frontend (pure SSE consumer)
+app.py                    # Streamlit frontend — 4 tabs: Chat · Orchestrator · Agent Activity · Quality Guardrails
 mcp_servers.json          # MCP server config (gitignored, create from example)
 mcp_servers.example.json  # Example MCP server config
 ```
@@ -152,20 +173,24 @@ SSE stream. The `detail` query parameter controls how much of the internal pipel
 | `detail` | Events included |
 |---|---|
 | `result` (default) | `synthesis_chunk`, `done`, `error` |
-| `orchestration` | + `orchestrator_tool_call`, `plan_chunk`, `plan_ready` |
+| `orchestration` | + `orchestrator_tool_call`, `plan_chunk`, `plan_ready`, `goal_clarified`, `plan_validation`, `quality_check`, `grounding_check` |
 | `full` | + `agent_message`, `stop_signal` |
 
 Every SSE frame is a `data:` line containing a JSON object with a `type` field:
 
 ```
-data: {"type": "synthesis_chunk", "text": "..."}
-data: {"type": "done", "result": "..."}
+data: {"type": "goal_clarified", "original": "...", "clarified": "...", "reasoning": "...", "was_changed": true}
 data: {"type": "orchestrator_tool_call", "tool": "web_search", "args": {...}, "result": "..."}
 data: {"type": "plan_chunk", "text": "..."}
 data: {"type": "plan_ready", "strategy": "autogen", "specs": [...]}
 data: {"type": "plan_ready", "strategy": "langgraph", "spec": {"nodes": [...], "edges": [...], "entry": "..."}}
+data: {"type": "plan_validation", "valid": true, "feedback": "", "attempt": 1}
 data: {"type": "agent_message", "agent": "analyst", "content": "...", "round": 1}
 data: {"type": "stop_signal", "reason": "...", "stopped_by": "orchestrator"}
+data: {"type": "synthesis_chunk", "text": "..."}
+data: {"type": "quality_check", "passes": true, "feedback": "", "attempt": 1}
+data: {"type": "grounding_check", "grounded": true, "unsupported_claims": []}
+data: {"type": "done", "result": "..."}
 data: {"type": "error", "message": "..."}
 ```
 
@@ -273,6 +298,44 @@ Used when the goal has a clear deterministic structure. Two valid cases:
 - **Conditional edges**: a node signals its route by ending its response with `[ROUTE: KEY]`. GraphRunner extracts the key, routes to the matching next node, and strips the tag before display or synthesis. If no valid tag is found, falls back to the unconditional edge (or END).
 
 The SSE event stream, Streamlit UI, and synthesis phase are identical for both strategies.
+
+---
+
+## Quality guardrails
+
+Four LLM-based guardrails run automatically on every request — no configuration needed.
+
+### 1. Goal Clarity Pre-check
+
+Runs before research. Rewrites vague goals (e.g. *"Tesla"*) into specific, actionable ones before any agents are planned. If the goal is already specific, it passes through unchanged.
+
+- `was_changed: true` → clarified goal is used for all downstream steps
+- `was_changed: false` → original goal used as-is
+- Emits: `goal_clarified`
+
+### 2. Plan Validator
+
+After the orchestrator produces a plan, the validator reviews it on four criteria: coverage (do agents address all aspects of the goal?), role distinctness, prompt specificity, and strategy fit (autogen vs langgraph).
+
+- If the plan fails, feedback is injected and the orchestrator replans — up to **3 attempts**
+- Research runs only once; only plan generation repeats on retry
+- Emits: `plan_validation` per attempt
+
+### 3. Quality Check
+
+After synthesis, checks whether the final report actually answers the goal. Synthesis is buffered internally — it is only streamed to the client once it passes (or retries are exhausted), preventing the UI from showing a failing report that gets replaced.
+
+- If the report fails, feedback is injected and synthesis is retried — **1 retry**
+- Emits: `quality_check` per attempt
+
+### 4. Grounding Check
+
+After the final synthesis, verifies that every significant claim in the report is backed by something in the agent conversation. Flags hallucinations — facts the synthesizer added that the agents never mentioned.
+
+- Does not trigger a retry — surfaced as a transparency signal
+- Emits: `grounding_check` with `grounded` bool and `unsupported_claims` list
+
+All four guardrails have defensive JSON parse fallbacks — a single LLM hiccup cannot abort the pipeline.
 
 ---
 

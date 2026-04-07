@@ -249,22 +249,28 @@ Available tools:
         )
         return tool_calls_made, research_text
 
-    async def plan_stream(self, goal: str):
+    async def _generate_plan_stream(
+        self,
+        goal: str,
+        research_text: str,
+        feedback: str | None = None,
+    ):
         """
-        Async generator for live UI display.
-        Phase 1 — yields OrchestratorToolCall as the orchestrator researches.
-        Phase 2 — yields str chunks as the plan JSON streams.
-        Phase 3 — yields list[AgentSpec] as the final item.
-        """
-        # Phase 1: research
-        tool_calls, research_text = await self._research(goal)
-        for tc in tool_calls:
-            yield tc
+        Async generator — streams plan JSON chunks then yields the parsed spec.
+        Accepts pre-computed research_text so research is not repeated on retries.
+        Optional feedback from a prior validator run is appended to the prompt.
 
-        # Phase 2 + 3: stream plan with research context injected
+        Phase 1 — yields str chunks as the plan JSON streams.
+        Phase 2 — yields list[AgentSpec] | GraphSpec as the final item.
+        """
         user_content = f"Goal: {goal}"
         if research_text:
             user_content += f"\n\nCurrent context from research:\n{research_text}"
+        if feedback:
+            user_content += (
+                f"\n\nPREVIOUS PLAN WAS REJECTED. Validator feedback:\n{feedback}\n\n"
+                "Please fix the issues described above and generate a revised plan."
+            )
 
         stream = await self._client().chat.completions.create(
             model=self._config.model,
@@ -292,6 +298,76 @@ Available tools:
         else:
             yield [AgentSpec(**spec) for spec in data.get("agents", [])]
 
+    async def plan_stream(self, goal: str):
+        """
+        Async generator for live UI display.
+        Phase 1 — yields OrchestratorToolCall as the orchestrator researches.
+        Phase 2 — yields str chunks as the plan JSON streams.
+        Phase 3 — yields list[AgentSpec] | GraphSpec as the final item.
+        """
+        tool_calls, research_text = await self._research(goal)
+        for tc in tool_calls:
+            yield tc
+        async for item in self._generate_plan_stream(goal, research_text):
+            yield item
+
+    _GOAL_CLARITY_SYSTEM = (
+        "You are a goal clarification assistant. Evaluate whether the user's goal is "
+        "specific and actionable enough for a team of AI research agents to tackle.\n\n"
+        "A goal is VAGUE if it is a broad topic, a one-word subject, or lacks a clear "
+        "question or deliverable (e.g. 'Tesla', 'AI news', 'crypto').\n"
+        "A goal is SPECIFIC if it asks a clear question or requests a defined output "
+        "(e.g. 'Compare Tesla Q1 2025 earnings vs Q1 2024 and assess whether the stock "
+        "is a buy today').\n\n"
+        "Return JSON: {\"clarified_goal\": \"the goal to use — rewritten if vague, "
+        "unchanged if already specific\", \"was_changed\": true|false, "
+        "\"reasoning\": \"one sentence explaining what you changed and why, or why no "
+        "change was needed\"}\n\n"
+        "If the goal is already specific, set was_changed=false and return the original "
+        "text verbatim. Do NOT over-engineer a precise goal — only rewrite when it is "
+        "genuinely too vague to plan agents for."
+    )
+
+    _PLAN_VALIDATOR_SYSTEM = (
+        "You are a plan quality reviewer for an AI agent orchestration system. "
+        "You are given the user's goal and the orchestrator's proposed agent plan as JSON.\n\n"
+        "Evaluate the plan on four criteria:\n"
+        "1. COVERAGE — do the agents/nodes collectively address all major aspects of the goal?\n"
+        "2. ROLE DISTINCTNESS — are agent roles meaningfully different, or is there overlap?\n"
+        "3. PROMPT SPECIFICITY — are system_prompts and task_prompts detailed and precise, "
+        "or vague placeholders?\n"
+        "4. STRATEGY FIT — is the chosen strategy (autogen vs langgraph) appropriate?\n\n"
+        "Return JSON: {\"valid\": true|false, \"feedback\": \"if valid=false: concise "
+        "actionable feedback listing exactly what must be fixed. If valid=true: empty string.\"}\n\n"
+        "Be strict but fair. Return valid=true if the plan is good enough to proceed, "
+        "even if minor improvements exist. Only return valid=false when there is a clear, "
+        "correctable problem that would materially harm output quality."
+    )
+
+    _QUALITY_CHECK_SYSTEM = (
+        "You are a report quality reviewer. Given the original goal and a synthesized "
+        "report, decide whether the report adequately answers the goal.\n\n"
+        "A report PASSES if: it directly addresses the core question, reaches a concrete "
+        "conclusion or recommendation, and has no large obvious gaps.\n"
+        "A report FAILS if: it ignores a major part of the goal, is mostly generic "
+        "background without addressing the specific question, or ends without a conclusion "
+        "when the goal asks for one.\n\n"
+        "Return JSON: {\"passes\": true|false, \"feedback\": \"if passes=false: specific "
+        "description of what is missing or wrong. If passes=true: empty string.\"}"
+    )
+
+    _GROUNDING_CHECK_SYSTEM = (
+        "You are a factual grounding verifier. Given the original goal, the full agent "
+        "conversation (the evidence base), and the final synthesized report, identify any "
+        "claims in the report that are NOT supported by the agent conversation.\n\n"
+        "A claim is UNSUPPORTED if it states a specific fact, number, date, or conclusion "
+        "not found anywhere in the agent conversation, or contradicts what the agents said. "
+        "Minor paraphrasing and reasonable inferences from the conversation are fine.\n\n"
+        "Return JSON: {\"grounded\": true|false, \"unsupported_claims\": "
+        "[\"verbatim or near-verbatim claim from the report with no backing in the conversation\"]}\n\n"
+        "Return grounded=true and unsupported_claims=[] if all claims are supported."
+    )
+
     _SYNTHESIZE_SYSTEM = (
         "You are a senior analyst synthesizing the findings from multiple AI agents. "
         "Given the original goal and the full agent conversation, produce a single, clean, "
@@ -309,18 +385,24 @@ Available tools:
         "aspects of the goal are uncovered, or agents have raised new questions."
     )
 
-    async def synthesize_stream(self, goal: str, context: SharedThread | str):
+    async def synthesize_stream(self, goal: str, context: SharedThread | str, feedback: str | None = None):
         """
         Async generator. Reads the full context (SharedThread or pre-formatted
         conversation text) and streams a clean final synthesis back to the user.
         """
         context_text = context if isinstance(context, str) else context.to_context()
+        user_content = f"Goal: {goal}\n\n{context_text}"
+        if feedback:
+            user_content += (
+                f"\n\nQUALITY CHECK FEEDBACK (previous synthesis was inadequate):\n{feedback}\n\n"
+                "Please address the gaps described above in your revised synthesis."
+            )
         stream = await self._client().chat.completions.create(
             model=self._config.model,
             stream=True,
             messages=[
                 {"role": "system", "content": self._SYNTHESIZE_SYSTEM},
-                {"role": "user", "content": f"Goal: {goal}\n\n{context_text}"},
+                {"role": "user", "content": user_content},
             ],
         )
         async for chunk in stream:
@@ -343,3 +425,88 @@ Available tools:
         )
         data = json.loads(response.choices[0].message.content)
         return data["converged"], data["reason"]
+
+    # ── Quality guardrails ────────────────────────────────────────────────────
+
+    async def clarify_goal(self, goal: str) -> dict:
+        """
+        Pre-flight check: is the goal specific enough to plan agents for?
+        Returns {"clarified_goal": str, "was_changed": bool, "reasoning": str}.
+        Falls back to the original goal if the LLM response cannot be parsed.
+        """
+        try:
+            response = await self._client().chat.completions.create(
+                model=self._config.model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": self._GOAL_CLARITY_SYSTEM},
+                    {"role": "user", "content": goal},
+                ],
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            return {"clarified_goal": goal, "was_changed": False, "reasoning": "Clarity check failed — using original goal."}
+
+    async def validate_plan(self, goal: str, plan_json: str) -> dict:
+        """
+        Review a generated plan JSON against the goal.
+        Returns {"valid": bool, "feedback": str}.
+        Falls back to valid=True on parse error to avoid blocking the pipeline.
+        """
+        try:
+            response = await self._client().chat.completions.create(
+                model=self._config.model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": self._PLAN_VALIDATOR_SYSTEM},
+                    {"role": "user", "content": f"Goal: {goal}\n\nProposed plan:\n{plan_json}"},
+                ],
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            return {"valid": True, "feedback": ""}
+
+    async def quality_check(self, goal: str, report: str) -> dict:
+        """
+        Check whether the synthesized report adequately answers the goal.
+        Returns {"passes": bool, "feedback": str}.
+        Falls back to passes=True on parse error.
+        """
+        try:
+            response = await self._client().chat.completions.create(
+                model=self._config.model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": self._QUALITY_CHECK_SYSTEM},
+                    {"role": "user", "content": f"Goal: {goal}\n\nReport:\n{report}"},
+                ],
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            return {"passes": True, "feedback": ""}
+
+    async def grounding_check(self, goal: str, conversation_text: str, report: str) -> dict:
+        """
+        Verify that claims in the final report are backed by the agent conversation.
+        Returns {"grounded": bool, "unsupported_claims": list[str]}.
+        Falls back to grounded=True on parse error.
+        """
+        try:
+            response = await self._client().chat.completions.create(
+                model=self._config.model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": self._GROUNDING_CHECK_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Goal: {goal}\n\n"
+                            f"Agent conversation (evidence base):\n{conversation_text}\n\n"
+                            f"Final report to verify:\n{report}"
+                        ),
+                    },
+                ],
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            return {"grounded": True, "unsupported_claims": []}

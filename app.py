@@ -87,7 +87,7 @@ st.title("🔨 agent-forge")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_chat, tab_orch, tab_agents = st.tabs(["💬 Chat", "🧠 Orchestrator", "🤖 Agent Activity"])
+tab_chat, tab_orch, tab_agents, tab_quality = st.tabs(["💬 Chat", "🧠 Orchestrator", "🤖 Agent Activity", "🛡️ Quality Guardrails"])
 
 # ── Tab 1: Chat ───────────────────────────────────────────────────────────────
 
@@ -120,6 +120,19 @@ with tab_agents:
     st.divider()
     conv_display = st.empty()
 
+with tab_quality:
+    st.markdown("#### 🎯 Goal Clarity")
+    goal_clarity_display = st.empty()
+    st.divider()
+    st.markdown("#### 📋 Plan Validation")
+    plan_validation_display = st.empty()
+    st.divider()
+    st.markdown("#### ✅ Quality Check")
+    quality_check_display = st.empty()
+    st.divider()
+    st.markdown("#### 🔍 Grounding Check")
+    grounding_check_display = st.empty()
+
 if not run_btn:
     st.stop()
 
@@ -136,13 +149,46 @@ agent_names: list[str] = []
 conv_messages: list[dict] = []
 stop_signal: dict | None = None
 synthesis_text = ""
+plan_validations: list[dict] = []
+quality_checks: list[dict] = []
 
 for event in stream_run(goal, int(max_rounds)):
     etype = event.get("type")
 
-    if etype == "orchestrator_tool_call":
+    if etype == "goal_clarified":
+        was_changed = event.get("was_changed", False)
+        with goal_clarity_display:
+            if was_changed:
+                st.warning(
+                    f"**Goal was clarified.**\n\n"
+                    f"**Original:** {event['original']}\n\n"
+                    f"**Clarified:** {event['clarified']}\n\n"
+                    f"*{event['reasoning']}*"
+                )
+                chat_status.info("⏳ Goal clarified — researching...")
+            else:
+                st.success(f"Goal is specific — no changes needed.\n\n*{event['reasoning']}*")
+                chat_status.info("⏳ Researching goal...")
+
+    elif etype == "orchestrator_tool_call":
         tool_calls.append(event)
         orch_status.info(f"🔍 Researched with {len(tool_calls)} tool call(s) — planning...")
+
+    elif etype == "plan_validation":
+        plan_validations.append(event)
+        attempt = event["attempt"]
+        if not event["valid"]:
+            # Reset plan_text so the next attempt renders cleanly
+            plan_text = ""
+            chat_status.info(f"⏳ Plan attempt {attempt} rejected — replanning...")
+        with plan_validation_display:
+            parts = []
+            for pv in plan_validations:
+                if pv["valid"]:
+                    parts.append(f"**Attempt {pv['attempt']}:** ✅ Plan accepted.")
+                else:
+                    parts.append(f"**Attempt {pv['attempt']}:** ❌ Rejected — {pv['feedback']}")
+            st.markdown("\n\n".join(parts))
 
     elif etype == "plan_chunk":
         plan_text += event["text"]
@@ -217,6 +263,29 @@ for event in stream_run(goal, int(max_rounds)):
             unsafe_allow_html=True,
         )
         chat_status.info("⏳ Synthesizing final report...")
+
+    elif etype == "quality_check":
+        quality_checks.append(event)
+        if not event["passes"] and event["attempt"] < 2:
+            chat_status.info("⏳ Quality check failed — re-synthesizing...")
+        with quality_check_display:
+            parts = []
+            for qc in quality_checks:
+                if qc["passes"]:
+                    parts.append(f"**Attempt {qc['attempt']}:** ✅ Report passed quality check.")
+                else:
+                    parts.append(f"**Attempt {qc['attempt']}:** ❌ Failed — {qc['feedback']}")
+            st.markdown("\n\n".join(parts))
+
+    elif etype == "grounding_check":
+        unsupported = event.get("unsupported_claims", [])
+        with grounding_check_display:
+            if event.get("grounded", True):
+                st.success("All claims are grounded in the agent conversation.")
+            else:
+                st.warning(f"{len(unsupported)} unsupported claim(s) found:")
+                for claim in unsupported:
+                    st.markdown(f"- {claim}")
 
     elif etype == "synthesis_chunk":
         synthesis_text += event["text"]
