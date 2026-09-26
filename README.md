@@ -1,5 +1,9 @@
 # agent-forge
 
+[![CI](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+
 **Framework-agnostic AI agent orchestration.**
 
 Send a goal, get back a synthesized report — produced by a dynamically planned team of AI agents that research, debate, and converge on an answer. No agents are predefined by default; the orchestrator writes every system prompt and task prompt from scratch for each goal.

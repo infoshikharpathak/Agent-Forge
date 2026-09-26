@@ -1,0 +1,32 @@
+name: CI
+
+# This project has no test suite yet, so CI is intentionally a smoke check
+# rather than a "tests passing" claim: it verifies the package installs
+# cleanly and the top-level package imports without error on a fresh
+# environment. Dummy API keys are set only so import-time client
+# construction (e.g. the OpenAI SDK) doesn't fail for lack of a key — no
+# network calls are made.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Import smoke test
+        env:
+          OPENAI_API_KEY: dummy-key-for-ci
+        run: python -c "import agent_forge; print('agent_forge imports cleanly')"
