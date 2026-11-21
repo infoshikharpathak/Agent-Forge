@@ -34,8 +34,8 @@ dependencies = [
   # App registry (YAML app configs)
   "pyyaml>=6.0",
 
-  # Anthropic backend (stub — uncomment when implementing)
-  # "anthropic>=0.40.0",
+  # Anthropic backend
+  "anthropic>=0.40.0",
 ]
 
 [project.scripts]
