@@ -38,6 +38,7 @@ from agent_forge.core.manager import AgentManager
 from agent_forge.core.orchestrator import AgentSpec, GraphSpec, Orchestrator
 from agent_forge.registry import AppRegistry
 from agent_forge.tools.mcp_bridge import MCPBridge
+from agent_forge.tools.sources import ToolSource, register_tool_source, unregister_tool_source
 from agent_forge.tracing import RunTracer
 
 # ── App registry ─────────────────────────────────────────────────────────────
@@ -50,7 +51,20 @@ _APPS_DIR = Path(__file__).resolve().parent.parent / "apps"
 async def _lifespan(_app: FastAPI):
     app_registry.load(_APPS_DIR)
     log.info("Loaded %d registered app(s) from %s", len(app_registry.list_apps()), _APPS_DIR)
-    yield
+    # Tool sources are registered once for the app's lifetime (the tool
+    # registry is process-wide; per-run registration would collide between
+    # concurrent runs).
+    sources = list(getattr(_app.state, "tool_sources", []))
+    registered = []
+    try:
+        for source in sources:
+            names = await register_tool_source(source)
+            registered.append(source)
+            log.info("Registered tool source %s: %s", type(source).__name__, names)
+        yield
+    finally:
+        for source in registered:
+            unregister_tool_source(source)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -58,13 +72,19 @@ async def _lifespan(_app: FastAPI):
 router = APIRouter()
 
 
-def create_app(hooks: Hooks | None = None) -> FastAPI:
+def create_app(
+    hooks: Hooks | None = None, tool_sources: list[ToolSource] | None = None
+) -> FastAPI:
     """Build the API app.
 
     *hooks* is an ordered list of AgentHooks applied to every agent run and
     handoff in every pipeline this app serves. It lives on this app
-    instance (``app.state.hooks``); there is no global registry. With no
-    hooks the pipeline behaves exactly as before.
+    instance (``app.state.hooks``); there is no global registry.
+
+    *tool_sources* are registered into the tool registry at startup and
+    removed at shutdown, so the planner can assign their tools to agents.
+
+    With neither, the pipeline behaves exactly as before.
     """
     api = FastAPI(
         title="agent-forge",
@@ -77,6 +97,7 @@ def create_app(hooks: Hooks | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     api.state.hooks = list(hooks or [])
+    api.state.tool_sources = list(tool_sources or [])
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

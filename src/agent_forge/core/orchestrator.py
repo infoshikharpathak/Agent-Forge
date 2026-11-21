@@ -268,8 +268,23 @@ Available tools:
         "Make 1-3 focused tool calls, then stop."
     )
 
-    # Tools the orchestrator is allowed to use
+    # Tools the orchestrator is allowed to use. Built-in tools only: tools
+    # from a ToolSource (or MCP) are for agents, never the research loop.
     _ORCHESTRATOR_TOOLS = ["web_search", "get_datetime"]
+
+    @classmethod
+    def _research_tool(cls, name: str):
+        """The built-in tool *name* if the research loop may call it, else None."""
+        from agent_forge.tools import _REGISTRY, _ensure_loaded
+        from agent_forge.tools.sources import is_source_tool
+
+        if name not in cls._ORCHESTRATOR_TOOLS:
+            return None
+        _ensure_loaded()
+        fn = _REGISTRY.get(name)
+        if fn is None or is_source_tool(fn):
+            return None
+        return fn
 
     async def _research(self, goal: str) -> tuple[list[OrchestratorToolCall], str]:
         """
@@ -287,7 +302,9 @@ Available tools:
             OrchestratorToolCall(tool="get_datetime", args={}, result=current_datetime)
         ]
 
-        tool_schemas = get_openai_schemas(self._ORCHESTRATOR_TOOLS)
+        tool_schemas = get_openai_schemas(
+            [n for n in self._ORCHESTRATOR_TOOLS if self._research_tool(n) is not None]
+        )
         messages: list[dict] = [
             {"role": "system", "content": self._RESEARCH_SYSTEM},
             {"role": "user", "content": f"Gather current context for: {goal}"},
@@ -307,10 +324,12 @@ Available tools:
 
             messages.append(msg)
             for tc in msg.tool_calls:
-                fn = get_tool(tc.function.name)
+                fn = self._research_tool(tc.function.name)
                 args = json.loads(tc.function.arguments)
                 import inspect as _inspect
-                if _inspect.iscoroutinefunction(fn):
+                if fn is None:
+                    result = f"Tool {tc.function.name!r} is not available to the orchestrator."
+                elif _inspect.iscoroutinefunction(fn):
                     result = await fn(**args)
                 else:
                     result = fn(**args)
