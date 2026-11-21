@@ -28,14 +28,13 @@ Failure handling:
 import logging
 import operator
 import re
-import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Annotated, Any, AsyncGenerator, TypedDict
 
 log = logging.getLogger("uvicorn.error")
 
-from agent_forge.core.agent import AgentRunResult
 from agent_forge.core.conversation import ConversationMessage, StopSignal
+from agent_forge.core.execution import execute_agent
 
 if TYPE_CHECKING:
     from agent_forge.core.factory import AgentFactory
@@ -65,32 +64,17 @@ def _is_valid_output(content: str) -> bool:
     return len((content or "").strip()) >= _MIN_OUTPUT_LENGTH
 
 
-async def _run_once_traced(agent: Any, task: str, label: str, tracer: RunTracer | None) -> str:
-    """Run agent.run() once, recording latency/usage/status to *tracer* if set."""
-    start = time.perf_counter()
-    try:
-        result = await agent.run(task)
-    except Exception:
-        if tracer is not None:
-            latency_ms = (time.perf_counter() - start) * 1000
-            tracer.record_agent(label, AgentRunResult(content="", model=""), latency_ms, status="failed")
-        raise
-    if tracer is not None:
-        latency_ms = (time.perf_counter() - start) * 1000
-        tracer.record_agent(label, result, latency_ms, status="success")
-    return result.content
-
-
 async def _run_with_retry(agent: Any, task: str, label: str, tracer: RunTracer | None = None) -> str:
     """
-    Run an agent task with a single retry on invalid output.
-    Falls back to a safe placeholder if both attempts fail.
+    Run an agent task with a single retry on invalid output, on top of the
+    shared execute_agent path. Falls back to a safe placeholder if both
+    attempts fail.
     """
-    content = await _run_once_traced(agent, task, label, tracer)
+    content = (await execute_agent(agent, task, label, tracer)).content
     if _is_valid_output(content):
         return content
     log.warning("[%s] invalid output (len=%d) — retrying", label, len(content or ""))
-    content = await _run_once_traced(agent, task, label, tracer)
+    content = (await execute_agent(agent, task, label, tracer)).content
     if _is_valid_output(content):
         return content
     log.error("[%s] failed after retry — using fallback", label)

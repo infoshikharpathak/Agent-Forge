@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING, Any
 
-from agent_forge.core.agent import AgentRunResult, BaseAgent
+from agent_forge.core.agent import BaseAgent
+from agent_forge.core.execution import execute_agent
 from agent_forge.core.factory import AgentFactory
 
 if TYPE_CHECKING:
@@ -82,20 +82,7 @@ class AgentManager:
         if thread and not thread.is_empty():
             full_task = f"{task}\n\n{thread.to_context()}"
 
-        start = time.perf_counter()
-        try:
-            result = await agent.run(full_task, **kwargs)
-        except Exception:
-            if self._tracer is not None:
-                latency_ms = (time.perf_counter() - start) * 1000
-                self._tracer.record_agent(
-                    agent.name, AgentRunResult(content="", model=""), latency_ms, status="failed"
-                )
-            raise
-
-        if self._tracer is not None:
-            latency_ms = (time.perf_counter() - start) * 1000
-            self._tracer.record_agent(agent.name, result, latency_ms, status="success")
+        result = await execute_agent(agent, full_task, agent.name, self._tracer, **kwargs)
 
         if thread is not None:
             thread.add(agent.name, result.content)
