@@ -114,6 +114,9 @@ RunTracer → SQLite     ← every run persisted regardless of outcome (Traceabi
 src/agent_forge/
 ├── core/
 │   ├── agent.py          # BaseAgent ABC + AgentStatus enum + AgentRunResult
+│   ├── context.py        # RunContext (trace_id, run_id, agent) in a ContextVar
+│   ├── execution.py      # execute_agent — the one path every agent run takes (context, hooks, tracing)
+│   ├── hooks.py          # AgentHooks + HookDecision — before/after run, on_handoff
 │   ├── factory.py        # AgentFactory ABC (create / close)
 │   ├── manager.py        # AgentManager — lifecycle + task routing + trace recording
 │   ├── orchestrator.py   # Orchestrator — plan, judge convergence, synthesize, match/plan_from_app
@@ -123,13 +126,15 @@ src/agent_forge/
 ├── backends/
 │   ├── autogen/          # ✅ AutoGen agentchat implementation
 │   ├── langgraph/        # ✅ LangGraph + LangChain implementation
-│   └── anthropic/        # 🔧 stub
+│   ├── anthropic/        # ✅ Anthropic Messages API with tool use
+│   └── openai/           # ✅ OpenAI Chat Completions with tool use
 ├── tools/
 │   ├── __init__.py       # Registry — @register, get_tools(), list_tools()
 │   ├── web.py            # web_search (DuckDuckGo), fetch_url
 │   ├── finance.py        # stock_price, company_financials (yfinance)
 │   ├── utility.py        # get_datetime, calculator, wikipedia_search
-│   └── mcp_bridge.py     # MCPBridge — connects MCP servers, registers tools (with per-server tool allowlist)
+│   ├── mcp_bridge.py     # MCPBridge — connects MCP servers, registers tools (with per-server tool allowlist)
+│   └── sources.py        # ToolSource — plug in an external tool provider
 ├── apps/                 # App Registry configs — one JSON/YAML file per registered app
 ├── api/
 │   └── app.py            # FastAPI backend — /health, /run, /run/stream, /apps, /traces
@@ -156,6 +161,13 @@ source .venv/bin/activate
 pip install -e .
 cp .env.example .env
 # add your OPENAI_API_KEY to .env
+```
+
+Tests (no API keys or network needed; every model call is stubbed):
+
+```bash
+pip install -e ".[dev]"
+pytest -q
 ```
 
 ---
@@ -201,8 +213,8 @@ Liveness probe.
 Blocking. Returns only the final synthesized report.
 
 ```json
-// Request
-{"goal": "...", "max_rounds": 3, "provider": "openai"}
+// Request (trace_id is optional: your own correlation ID, see "Hooks, tool sources, and trace IDs")
+{"goal": "...", "max_rounds": 3, "provider": "openai", "trace_id": "req-8f2c"}
 
 // Response
 {"result": "..."}
@@ -295,10 +307,84 @@ agent-forge traces --app logscribe --status failed
 
 ```
 GET /traces?limit=10&app_id=logscribe&status=failed&cost_above=0.01
+GET /traces?trace_id=req-8f2c
 GET /traces/{run_id}
 ```
 
+Each row also carries a `trace_id`: the caller's own ID if one was passed to `/run`, otherwise the run's `run_id`. Hook denials appear in `guardrails_triggered` (as `hook:<event>:<outcome>:<agent>`), with their messages under `metadata.hook_denials`.
+
 **Scope note:** v1 tokenizes spawned-agent calls only — the orchestrator's own planning/guardrail LLM calls aren't yet counted, so `total_cost_usd`/`total_tokens` understate true spend for dynamic (non-locked) runs. A known, disclosed gap, not silently rounded into the totals.
+
+---
+
+## Hooks, tool sources, and trace IDs
+
+Three extension points let a host application (a governance layer, a policy service, an internal tool gateway) plug into agent-forge without agent-forge knowing about it. With no hooks and no tool sources, behavior is exactly as before.
+
+### Hooks
+
+Subclass `AgentHooks` and override any of three async methods. Each one returns a `HookDecision`: allow (optionally with replacement `content`) or deny (with a `message`). The defaults allow everything unchanged.
+
+```python
+from agent_forge.core import AgentHooks, HookDecision
+from agent_forge.api.app import create_app
+
+class BlockKeyword(AgentHooks):
+    def __init__(self, keyword: str):
+        self.keyword = keyword.lower()
+
+    async def before_agent_run(self, ctx, task):
+        if self.keyword in task.lower():
+            return HookDecision.deny(f"Blocked: input mentions {self.keyword!r}.")
+        return HookDecision.allow()
+
+app = create_app(hooks=[BlockKeyword("password")])   # uvicorn mymodule:app
+```
+
+| Hook | Deny | Allow with `content` |
+|---|---|---|
+| `before_agent_run(ctx, task)` | `agent.run()` isn't called. The result is the message, status `blocked`. | Replaces the task |
+| `after_agent_run(ctx, output)` | The output is withheld and replaced by the message, status `withheld`. | Replaces the output |
+| `on_handoff(ctx, from_agent, to_agent, payload)` | That branch stops. In a graph it routes to END (other fan-out branches continue); in a conversation the debate ends. | Replaces what the next agent receives |
+
+- **Where handoffs fire:** in the graph strategy, on every transition the router picks, conditional or not. In the conversation strategy, between speakers, and when `AgentManager.run_task(thread=...)` hands a `SharedThread` to the next agent.
+- **Order:** hooks are an ordered list passed to `create_app`, `AgentManager` or `GraphRunner` (there is no global registry). Each hook sees the previous one's replacement, and the first deny wins.
+- **Failures:** a hook that raises or returns the wrong type counts as a deny (fail closed). It never crashes the pipeline.
+- **Retries and records:** blocked and withheld results are never retried. Every deny is recorded on the run trace.
+
+### Tool sources
+
+A `ToolSource` lists tools as JSON schemas and executes them. Registered tools are usable by agents on every backend (AutoGen, LangGraph, OpenAI, Anthropic), exactly like built-in or MCP tools. The planner can assign them to agents, but the orchestrator's own research loop never calls them.
+
+```python
+from agent_forge.tools.sources import ToolSpec
+
+class OrdersTools:
+    async def list_tools(self):
+        return [ToolSpec(
+            name="lookup_order",
+            description="Look up an order by ID.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+            },
+        )]
+
+    async def call(self, name, args, ctx):
+        # ctx.trace_id / ctx.run_id / ctx.agent_name identify who is calling
+        return await orders_api.get(args["order_id"], trace_id=ctx.trace_id)
+
+app = create_app(tool_sources=[OrdersTools()])   # registered at startup, removed at shutdown
+```
+
+Outside the API, use `await register_tool_source(src)` / `unregister_tool_source(src)`, or `async with tool_source(src):`. A name that collides with an existing tool raises at registration, and nothing from that source is registered.
+
+### Run context and trace IDs
+
+Every agent run executes inside a `RunContext` (`trace_id`, `run_id`, `agent_name`, `agent_role`, plus an `app` field that is reserved and always `None` for now). It's held in a `ContextVar`, so concurrent runs never see each other's context. Hooks receive it as `ctx`, tool sources receive it in `call()`, and any code inside a run can read it with `agent_forge.core.current_run_context()`.
+
+Pass `trace_id` to `/run` (or `RunTracer(trace_id=...)`) to tie a run to your own request ID. It defaults to the run's `run_id`, is persisted on the trace row, and can be filtered with `GET /traces?trace_id=...`.
 
 ---
 
@@ -557,7 +643,6 @@ The manager, orchestrator, conversation loop, graph runner, and API layer are al
 
 ## Planned
 
-- Anthropic backend implementation
 - Additional tools (code executor, news API, etc.)
 - Context compression for long agent conversations
 - Authentication / multi-user support
