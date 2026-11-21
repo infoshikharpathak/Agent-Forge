@@ -94,6 +94,9 @@ class RunRequest(BaseModel):
     """Maximum conversation rounds between agents before forcing a stop."""
     provider: str = "openai"
     """LLM provider to use for all agents and the orchestrator."""
+    trace_id: str | None = None
+    """Optional caller correlation ID, recorded on the run trace and visible to
+    hooks and tool sources. Defaults to the run's own run_id."""
 
 
 class RunResponse(BaseModel):
@@ -158,6 +161,7 @@ async def _pipeline_inner(req: RunRequest) -> AsyncGenerator[tuple[str, str], No
     tracer = RunTracer(
         task=req.goal, routing_tier=routing_tier,
         app_id=app_config.app_id if app_config else None,
+        trace_id=req.trace_id,
     )
 
     try:
@@ -470,10 +474,12 @@ def list_traces(
     status: str | None = None,
     since: str | None = None,
     cost_above: float | None = None,
+    trace_id: str | None = None,
 ):
     """Query run traces. All filters are optional and combine with AND."""
     return db.query_runs(
         limit=limit, app_id=app_id, status=status, since=since, cost_above=cost_above,
+        trace_id=trace_id,
     )
 
 

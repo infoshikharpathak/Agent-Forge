@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from agent_forge import db
 from agent_forge.core.agent import AgentRunResult
+from agent_forge.core.context import RunContext
 
 # Approximate $ per 1K tokens as (input_rate, output_rate). Unknown models cost
 # $0 — this table is illustrative/editable, not a source of billing truth.
@@ -45,12 +46,22 @@ class RunTracer:
     routing_tier: str
     app_id: str | None = None
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    trace_id: str | None = None
+    """Caller-supplied correlation ID. Defaults to run_id when not given."""
     agents_spawned: list[dict] = field(default_factory=list, init=False)
     guardrails_triggered: list[str] = field(default_factory=list, init=False)
     _started_at: float = field(default_factory=time.perf_counter, init=False, repr=False)
     _timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(), init=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        if not self.trace_id:
+            self.trace_id = self.run_id
+
+    def run_context(self) -> RunContext:
+        """Base RunContext for agents executed under this tracer."""
+        return RunContext(trace_id=self.trace_id or self.run_id, run_id=self.run_id)
 
     def record_agent(
         self, agent_id: str, result: AgentRunResult, latency_ms: float, status: str
@@ -81,6 +92,7 @@ class RunTracer:
         )
         row = {
             "run_id": self.run_id,
+            "trace_id": self.trace_id,
             "timestamp": self._timestamp,
             "task": self.task,
             "routing_tier": self.routing_tier,

@@ -18,6 +18,7 @@ _DEFAULT_DB_PATH = Path("agent_forge_traces.db")
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
+    trace_id TEXT,
     timestamp TEXT NOT NULL,
     task TEXT NOT NULL,
     routing_tier TEXT NOT NULL,
@@ -47,11 +48,15 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute(_SCHEMA)
     # CREATE TABLE IF NOT EXISTS doesn't alter an already-existing table —
-    # migrate older DB files that predate the report column.
-    try:
-        conn.execute("ALTER TABLE runs ADD COLUMN report TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # migrate older DB files that predate later columns.
+    for ddl in (
+        "ALTER TABLE runs ADD COLUMN report TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE runs ADD COLUMN trace_id TEXT",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return conn
 
 
@@ -60,13 +65,13 @@ def insert_run(row: dict) -> None:
         conn.execute(
             """
             INSERT INTO runs (
-                run_id, timestamp, task, routing_tier, app_id, framework_used,
+                run_id, trace_id, timestamp, task, routing_tier, app_id, framework_used,
                 agents_spawned, guardrails_triggered, total_latency_ms, total_cost_usd,
                 total_input_tokens, total_output_tokens, outcome, error, report, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["run_id"], row["timestamp"], row["task"], row["routing_tier"],
+                row["run_id"], row.get("trace_id"), row["timestamp"], row["task"], row["routing_tier"],
                 row.get("app_id"), row.get("framework_used"),
                 json.dumps(row["agents_spawned"]), json.dumps(row["guardrails_triggered"]),
                 row["total_latency_ms"], row["total_cost_usd"],
@@ -92,9 +97,13 @@ def query_runs(
     status: str | None = None,
     since: str | None = None,
     cost_above: float | None = None,
+    trace_id: str | None = None,
 ) -> list[dict]:
     clauses: list[str] = []
     params: list = []
+    if trace_id is not None:
+        clauses.append("trace_id = ?")
+        params.append(trace_id)
     if app_id is not None:
         clauses.append("app_id = ?")
         params.append(app_id)
