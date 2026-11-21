@@ -34,7 +34,8 @@ from typing import TYPE_CHECKING, Annotated, Any, AsyncGenerator, TypedDict
 log = logging.getLogger("uvicorn.error")
 
 from agent_forge.core.conversation import ConversationMessage, StopSignal
-from agent_forge.core.execution import execute_agent
+from agent_forge.core.execution import base_run_context, execute_agent
+from agent_forge.core.hooks import Hooks, run_hooks
 
 if TYPE_CHECKING:
     from agent_forge.core.factory import AgentFactory
@@ -64,17 +65,24 @@ def _is_valid_output(content: str) -> bool:
     return len((content or "").strip()) >= _MIN_OUTPUT_LENGTH
 
 
-async def _run_with_retry(agent: Any, task: str, label: str, tracer: RunTracer | None = None) -> str:
+async def _run_with_retry(
+    agent: Any, task: str, label: str, tracer: RunTracer | None = None, hooks: Hooks | None = None
+) -> str:
     """
     Run an agent task with a single retry on invalid output, on top of the
     shared execute_agent path. Falls back to a safe placeholder if both
-    attempts fail.
+    attempts fail. A hook-blocked or withheld result is returned as-is
+    (its content is the hook's message) and never retried.
     """
-    content = (await execute_agent(agent, task, label, tracer)).content
-    if _is_valid_output(content):
+    result = await execute_agent(agent, task, label, tracer, hooks)
+    content = result.content
+    if result.status != "success" or _is_valid_output(content):
         return content
     log.warning("[%s] invalid output (len=%d) — retrying", label, len(content or ""))
-    content = (await execute_agent(agent, task, label, tracer)).content
+    result = await execute_agent(agent, task, label, tracer, hooks)
+    content = result.content
+    if result.status != "success":
+        return content
     if _is_valid_output(content):
         return content
     log.error("[%s] failed after retry — using fallback", label)
@@ -109,11 +117,45 @@ class GraphRunner:
         spec:    Graph specification produced by the Orchestrator.
     """
 
-    def __init__(self, factory: AgentFactory, spec: GraphSpec, tracer: RunTracer | None = None) -> None:
+    def __init__(
+        self,
+        factory: AgentFactory,
+        spec: GraphSpec,
+        tracer: RunTracer | None = None,
+        hooks: Hooks | None = None,
+    ) -> None:
         self._factory = factory
         self._spec = spec
         self._tracer = tracer
+        self._hooks: list = list(hooks or [])
         self._messages: list[dict] = []
+        # (from_node, to_node) -> replacement payload from an on_handoff hook
+        self._handoff_overrides: dict[tuple[str, str], str] = {}
+        self._node_roles = {n.name: n.role_description for n in spec.nodes}
+
+    async def _filter_handoffs(self, from_node: str, targets: list[Any], state: _AgentState, end: Any) -> Any:
+        """Run on_handoff for each chosen next node. Denied targets are dropped
+        (that branch ends); if none remain the graph routes to END."""
+        node_msgs = [m for m in state["messages"] if m["agent"] == from_node]
+        payload = _strip_route(node_msgs[-1]["content"]) if node_msgs else ""
+        ctx = base_run_context(self._tracer).for_agent(from_node, self._node_roles.get(from_node))
+        allowed: list[Any] = []
+        for target in targets:
+            if target == end:
+                allowed.append(target)
+                continue
+            outcome = await run_hooks(
+                self._hooks, "on_handoff", ctx, payload,
+                subject=f"{from_node}->{target}", tracer=self._tracer,
+                handoff=(from_node, target),
+            )
+            if outcome.allowed:
+                allowed.append(target)
+                if outcome.value != payload:
+                    self._handoff_overrides[(from_node, target)] = outcome.value
+        if not allowed:
+            return end
+        return allowed[0] if len(allowed) == 1 else allowed
 
     async def run_stream(
         self, goal: str
@@ -154,7 +196,8 @@ class GraphRunner:
             async def node_fn(state: _AgentState) -> dict:
                 task = f"{state['goal']}\n\n{node_task_map[node_name]}"
                 context = "\n\n".join(
-                    f"{m['agent']}:\n{_strip_route(m['content'])}"
+                    f"{m['agent']}:\n"
+                    + self._handoff_overrides.get((m["agent"], node_name), _strip_route(m["content"]))
                     for m in state["messages"]
                 )
                 if context:
@@ -169,7 +212,7 @@ class GraphRunner:
                         f"Choose the route that best matches your analysis."
                     )
                 # Raw content kept in state so router can read {"route": ...} JSON
-                content = await _run_with_retry(agent, task, node_name, self._tracer)
+                content = await _run_with_retry(agent, task, node_name, self._tracer, self._hooks)
                 return {"messages": [{"agent": node_name, "content": content}]}
             return node_fn
 
@@ -183,7 +226,8 @@ class GraphRunner:
         if not self._spec.edges:
             for node in self._spec.nodes:
                 content = await _run_with_retry(
-                    agents[node.name], f"{goal}\n\n{node.task_prompt}", node.name, self._tracer
+                    agents[node.name], f"{goal}\n\n{node.task_prompt}", node.name, self._tracer,
+                    self._hooks,
                 )
                 clean = _strip_route(content)
                 self._messages.append({"agent": node.name, "content": clean})
@@ -230,8 +274,17 @@ class GraphRunner:
                             return fb
                         return router
 
+                    router = _make_router(from_node, cond_map, fallback)
+                    if self._hooks:
+                        router = self._with_handoff_hooks(from_node, router, END)
+                    workflow.add_conditional_edges(from_node, router)
+                elif self._hooks:
+                    # Unconditional edges become a router too, so on_handoff
+                    # can veto each transition (fan-out preserved).
+                    targets = [e.to_node for e in unconditional]
                     workflow.add_conditional_edges(
-                        from_node, _make_router(from_node, cond_map, fallback)
+                        from_node,
+                        self._with_handoff_hooks(from_node, lambda _state, t=targets: t, END),
                     )
                 else:
                     for edge in unconditional:
@@ -268,6 +321,14 @@ class GraphRunner:
             await agent.close()
 
         yield StopSignal(reason="Graph execution complete.", stopped_by="graph")
+
+    def _with_handoff_hooks(self, from_node: str, choose: Any, end: Any) -> Any:
+        """Wrap a route-choosing function so on_handoff runs on its picks."""
+        async def router(state: _AgentState) -> Any:
+            picked = choose(state)
+            targets = picked if isinstance(picked, list) else [picked]
+            return await self._filter_handoffs(from_node, targets, state, end)
+        return router
 
     def to_context_text(self) -> str:
         """Return accumulated node outputs as a single context string for synthesis."""

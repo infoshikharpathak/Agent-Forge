@@ -50,6 +50,7 @@ class RunTracer:
     """Caller-supplied correlation ID. Defaults to run_id when not given."""
     agents_spawned: list[dict] = field(default_factory=list, init=False)
     guardrails_triggered: list[str] = field(default_factory=list, init=False)
+    hook_denials: list[dict] = field(default_factory=list, init=False)
     _started_at: float = field(default_factory=time.perf_counter, init=False, repr=False)
     _timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(), init=False, repr=False
@@ -79,6 +80,12 @@ class RunTracer:
     def record_guardrail(self, name: str) -> None:
         self.guardrails_triggered.append(name)
 
+    def record_hook_denial(self, label: str, message: str, *, hook: str) -> None:
+        """A hook denied something: record it as a guardrail, and keep the
+        message (persisted under metadata["hook_denials"])."""
+        self.record_guardrail(label)
+        self.hook_denials.append({"guardrail": label, "hook": hook, "message": message})
+
     async def finish(
         self, outcome: str, *, error: str | None = None, framework_used: str | None = None,
         report: str = "",
@@ -107,6 +114,6 @@ class RunTracer:
             "outcome": outcome,
             "error": error,
             "report": report,
-            "metadata": {},
+            "metadata": {"hook_denials": self.hook_denials} if self.hook_denials else {},
         }
         await asyncio.to_thread(db.insert_run, row)

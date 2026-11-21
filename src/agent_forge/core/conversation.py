@@ -10,6 +10,9 @@ log = logging.getLogger("uvicorn.error")
 
 _MIN_OUTPUT_LENGTH = 20  # lower threshold for debate agents vs graph nodes
 
+from agent_forge.core.execution import base_run_context
+from agent_forge.core.hooks import run_hooks
+
 
 def _is_valid_output(content: str) -> bool:
     return len((content or "").strip()) >= _MIN_OUTPUT_LENGTH
@@ -61,7 +64,7 @@ class ConversationMessage:
 @dataclass
 class StopSignal:
     reason: str
-    stopped_by: str  # "orchestrator" | "max_rounds"
+    stopped_by: str  # "orchestrator" | "max_rounds" | "graph" | "hook"
 
 
 class AgentConversation:
@@ -99,27 +102,33 @@ class AgentConversation:
     def history(self) -> list[ConversationMessage]:
         return list(self._history)
 
-    def to_context_text(self) -> str:
-        """Format the full conversation history as a plain-text block."""
+    def to_context_text(self, last_override: str | None = None) -> str:
+        """Format the full conversation history as a plain-text block.
+
+        *last_override* replaces the latest message's content (a handoff
+        hook's replacement payload) without changing the stored history."""
         if not self._history:
             return ""
         lines = ["=== Conversation so far ==="]
         current_round = 0
-        for msg in self._history:
+        for i, msg in enumerate(self._history):
             if msg.round != current_round:
                 current_round = msg.round
                 lines.append(f"\n-- Round {current_round} --")
-            lines.append(f"[{msg.agent}]: {msg.content}")
+            content = msg.content
+            if last_override is not None and i == len(self._history) - 1:
+                content = last_override
+            lines.append(f"[{msg.agent}]: {content}")
         lines.append("=== End of conversation ===")
         return "\n\n".join(lines)
 
-    def _build_task(self, goal: str) -> str:
+    def _build_task(self, goal: str, last_override: str | None = None) -> str:
         """Build the full task string for the next agent turn."""
         if not self._history:
             return goal + _POSITION_INSTRUCTION
         return (
             f"Goal: {goal}\n\n"
-            f"{self.to_context_text()}\n\n"
+            f"{self.to_context_text(last_override)}\n\n"
             "Based on the conversation above, continue your contribution. "
             "Build on prior points, challenge weak reasoning, or add new insights. "
             "Be direct and specific."
@@ -144,12 +153,33 @@ class AgentConversation:
             current_positions: list[dict] = []
 
             for agent in self._agents:
-                task = self._build_task(goal)
-                result = await self._manager.run_task(agent.agent_id, task)
-                if not _is_valid_output(result):
+                # Passing the conversation to the next agent is a handoff from
+                # the previous speaker. A deny ends the conversation (it is a
+                # single chain); an allow with content replaces what is handed over.
+                override: str | None = None
+                if self._manager.hooks and self._history and self._history[-1].agent != agent.name:
+                    prev = self._history[-1]
+                    ctx = base_run_context(self._manager.tracer).for_agent(prev.agent, None)
+                    outcome = await run_hooks(
+                        self._manager.hooks, "on_handoff", ctx, prev.content,
+                        subject=f"{prev.agent}->{agent.name}", tracer=self._manager.tracer,
+                        handoff=(prev.agent, agent.name),
+                    )
+                    if not outcome.allowed:
+                        yield StopSignal(reason=outcome.value, stopped_by="hook")
+                        return
+                    if outcome.value != prev.content:
+                        override = outcome.value
+
+                task = self._build_task(goal, override)
+                run = await self._manager.run_task_result(agent.agent_id, task)
+                result = run.content
+                # Hook-blocked/withheld results carry the hook's message; never retry them.
+                if run.status == "success" and not _is_valid_output(result):
                     log.warning("[agent] %s invalid output (len=%d) — retrying", agent.name, len(result or ""))
-                    result = await self._manager.run_task(agent.agent_id, task)
-                    if not _is_valid_output(result):
+                    run = await self._manager.run_task_result(agent.agent_id, task)
+                    result = run.content
+                    if run.status == "success" and not _is_valid_output(result):
                         log.error("[agent] %s failed after retry — using fallback", agent.name)
                         result = f"[{agent.name}: failed to produce a valid response]"
 

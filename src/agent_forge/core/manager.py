@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from agent_forge.core.agent import BaseAgent
-from agent_forge.core.execution import execute_agent
+from agent_forge.core.agent import AgentRunResult, BaseAgent
+from agent_forge.core.execution import base_run_context, execute_agent
 from agent_forge.core.factory import AgentFactory
+from agent_forge.core.hooks import Hooks, run_hooks
 
 if TYPE_CHECKING:
     from agent_forge.core.shared_thread import SharedThread
@@ -28,9 +29,16 @@ class AgentManager:
         await manager.shutdown()
     """
 
-    def __init__(self, factory: AgentFactory, tracer: RunTracer | None = None) -> None:
+    def __init__(
+        self, factory: AgentFactory, tracer: RunTracer | None = None, hooks: Hooks | None = None
+    ) -> None:
         self._factory = factory
         self._tracer = tracer
+        self.hooks: list = list(hooks or [])
+
+    @property
+    def tracer(self) -> RunTracer | None:
+        return self._tracer
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -75,19 +83,51 @@ class AgentManager:
         If a SharedThread is provided, prior agent findings are injected as
         context before the task runs, and the result is appended to the thread.
         """
+        return (await self.run_task_result(agent_id, task, thread=thread, **kwargs)).content
+
+    async def run_task_result(
+        self,
+        agent_id: str,
+        task: str,
+        *,
+        thread: SharedThread | None = None,
+        **kwargs: Any,
+    ) -> AgentRunResult:
+        """Like run_task, but returns the full AgentRunResult (including a
+        hook "blocked"/"withheld" status).
+
+        Handing the SharedThread's findings to this agent is a handoff from
+        the thread's latest author: on_handoff hooks may replace that
+        context, or deny it, in which case the agent is not run.
+        """
         agent = self._factory.get(agent_id)
         logger.info("Running task on agent id=%s", agent_id)
 
         full_task = task
         if thread and not thread.is_empty():
-            full_task = f"{task}\n\n{thread.to_context()}"
+            context = thread.to_context()
+            if self.hooks:
+                source = thread.messages()[-1].agent
+                ctx = base_run_context(self._tracer).for_agent(source, None)
+                outcome = await run_hooks(
+                    self.hooks, "on_handoff", ctx, context,
+                    subject=f"{source}->{agent.name}", tracer=self._tracer,
+                    handoff=(source, agent.name),
+                )
+                if not outcome.allowed:
+                    result = AgentRunResult(content=outcome.value, model="", status="blocked")
+                    if self._tracer is not None:
+                        self._tracer.record_agent(agent.name, result, 0.0, status="blocked")
+                    return result
+                context = outcome.value
+            full_task = f"{task}\n\n{context}"
 
-        result = await execute_agent(agent, full_task, agent.name, self._tracer, **kwargs)
+        result = await execute_agent(agent, full_task, agent.name, self._tracer, self.hooks, **kwargs)
 
-        if thread is not None:
+        if thread is not None and result.status != "blocked":
             thread.add(agent.name, result.content)
 
-        return result.content
+        return result
 
     # ------------------------------------------------------------------
     # Introspection

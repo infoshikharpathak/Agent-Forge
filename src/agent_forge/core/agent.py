@@ -19,6 +19,8 @@ class AgentRunResult:
     model: str
     input_tokens: int = 0
     output_tokens: int = 0
+    status: str = "success"
+    """"success", or "blocked" / "withheld" when a hook stopped the run or its output."""
 
 
 class BaseAgent(ABC):

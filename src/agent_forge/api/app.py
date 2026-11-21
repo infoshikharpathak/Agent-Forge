@@ -23,7 +23,7 @@ from typing import AsyncGenerator
 
 log = logging.getLogger("uvicorn.error")
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -33,6 +33,7 @@ from agent_forge.backends.autogen import AutoGenFactory
 from agent_forge.backends.langgraph import LangGraphFactory
 from agent_forge.core.conversation import AgentConversation, ConversationMessage, StopSignal
 from agent_forge.core.graph_runner import GraphRunner
+from agent_forge.core.hooks import Hooks
 from agent_forge.core.manager import AgentManager
 from agent_forge.core.orchestrator import AgentSpec, GraphSpec, Orchestrator
 from agent_forge.registry import AppRegistry
@@ -54,23 +55,37 @@ async def _lifespan(_app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(
-    title="agent-forge",
-    version="0.1.0",
-    description=(
-        "Framework-agnostic AI agent orchestration API. "
-        "Send a goal, get back a synthesized report produced by a dynamically planned "
-        "team of AI agents that research, debate, and converge on an answer."
-    ),
-    lifespan=_lifespan,
-)
+router = APIRouter()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def create_app(hooks: Hooks | None = None) -> FastAPI:
+    """Build the API app.
+
+    *hooks* is an ordered list of AgentHooks applied to every agent run and
+    handoff in every pipeline this app serves. It lives on this app
+    instance (``app.state.hooks``); there is no global registry. With no
+    hooks the pipeline behaves exactly as before.
+    """
+    api = FastAPI(
+        title="agent-forge",
+        version="0.1.0",
+        description=(
+            "Framework-agnostic AI agent orchestration API. "
+            "Send a goal, get back a synthesized report produced by a dynamically planned "
+            "team of AI agents that research, debate, and converge on an answer."
+        ),
+        lifespan=_lifespan,
+    )
+    api.state.hooks = list(hooks or [])
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    api.include_router(router)
+    return api
+
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -106,7 +121,9 @@ class RunResponse(BaseModel):
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 
-async def _pipeline(req: RunRequest) -> AsyncGenerator[tuple[str, str], None]:
+async def _pipeline(
+    req: RunRequest, hooks: Hooks | None = None
+) -> AsyncGenerator[tuple[str, str], None]:
     """
     Runs the full pipeline and yields (event_type, json_str) tuples.
     Callers filter by detail level.
@@ -115,11 +132,13 @@ async def _pipeline(req: RunRequest) -> AsyncGenerator[tuple[str, str], None]:
     registered before the orchestrator plans and cleaned up after shutdown.
     """
     async with MCPBridge():
-        async for event in _pipeline_inner(req):
+        async for event in _pipeline_inner(req, hooks):
             yield event
 
 
-async def _pipeline_inner(req: RunRequest) -> AsyncGenerator[tuple[str, str], None]:
+async def _pipeline_inner(
+    req: RunRequest, hooks: Hooks | None = None
+) -> AsyncGenerator[tuple[str, str], None]:
     """Core pipeline logic, called inside an active MCPBridge context.
 
     Pipeline stages:
@@ -283,7 +302,7 @@ async def _pipeline_inner(req: RunRequest) -> AsyncGenerator[tuple[str, str], No
             log.info("[execute] strategy=langgraph")
             framework_used = "langgraph"
             factory = LangGraphFactory(provider=req.provider)
-            runner = GraphRunner(factory=factory, spec=plan, tracer=tracer)
+            runner = GraphRunner(factory=factory, spec=plan, tracer=tracer, hooks=hooks)
             async for item in runner.run_stream(req.goal):
                 if isinstance(item, ConversationMessage):
                     log.info("[node] %s | %d chars", item.agent, len(item.content))
@@ -302,7 +321,7 @@ async def _pipeline_inner(req: RunRequest) -> AsyncGenerator[tuple[str, str], No
             framework_used = "autogen"
             specs: list[AgentSpec] = plan or []
             factory = AutoGenFactory(provider=req.provider)
-            manager = AgentManager(factory, tracer=tracer)
+            manager = AgentManager(factory, tracer=tracer, hooks=hooks)
             agents = []
             for spec in specs:
                 agent = await manager.spawn(
@@ -424,7 +443,9 @@ _ORCHESTRATION_EVENTS = {
 _CONVERSATION_EVENTS = {"agent_message", "stop_signal"}
 
 
-async def _filtered_stream(req: RunRequest, detail: DetailLevel) -> AsyncGenerator[str, None]:
+async def _filtered_stream(
+    req: RunRequest, detail: DetailLevel, hooks: Hooks | None = None
+) -> AsyncGenerator[str, None]:
     """Wrap ``_pipeline()`` and emit only the SSE events appropriate for *detail*.
 
     Always emits: ``synthesis_chunk``, ``done``, ``error``.
@@ -442,7 +463,7 @@ async def _filtered_stream(req: RunRequest, detail: DetailLevel) -> AsyncGenerat
         SSE-formatted strings ready to be sent as ``text/event-stream``.
     """
     try:
-        async for etype, edata in _pipeline(req):
+        async for etype, edata in _pipeline(req, hooks):
             if etype in ("synthesis_chunk", "done", "error"):
                 yield _sse(etype, edata)
             elif etype in _ORCHESTRATION_EVENTS and detail in (DetailLevel.orchestration, DetailLevel.full):
@@ -455,19 +476,19 @@ async def _filtered_stream(req: RunRequest, detail: DetailLevel) -> AsyncGenerat
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.get("/health")
+@router.get("/health")
 def health():
     """Liveness probe. Returns ``{"status": "ok"}`` when the server is up."""
     return {"status": "ok"}
 
 
-@app.get("/apps")
+@router.get("/apps")
 def list_apps():
     """List all registered apps (loaded from /apps at startup)."""
     return [a.model_dump() for a in app_registry.list_apps()]
 
 
-@app.get("/traces")
+@router.get("/traces")
 def list_traces(
     limit: int = Query(default=10, ge=1, le=200),
     app_id: str | None = None,
@@ -483,7 +504,7 @@ def list_traces(
     )
 
 
-@app.get("/traces/{run_id}")
+@router.get("/traces/{run_id}")
 def get_trace(run_id: str):
     """Fetch a single run trace by ID."""
     row = db.get_run(run_id)
@@ -492,11 +513,11 @@ def get_trace(run_id: str):
     return row
 
 
-@app.post("/run", response_model=RunResponse)
-async def run(req: RunRequest) -> RunResponse:
+@router.post("/run", response_model=RunResponse)
+async def run(req: RunRequest, request: Request) -> RunResponse:
     """Run the full pipeline and return only the final report."""
     result_parts: list[str] = []
-    async for etype, edata in _pipeline(req):
+    async for etype, edata in _pipeline(req, request.app.state.hooks):
         if etype == "done":
             result_parts = [json.loads(edata).get("result", "")]
         elif etype == "error":
@@ -504,9 +525,10 @@ async def run(req: RunRequest) -> RunResponse:
     return RunResponse(result="".join(result_parts))
 
 
-@app.post("/run/stream")
+@router.post("/run/stream")
 async def run_stream(
     req: RunRequest,
+    request: Request,
     detail: DetailLevel = Query(default=DetailLevel.result),
 ):
     """
@@ -517,7 +539,12 @@ async def run_stream(
     detail=full           — adds agent conversation events too
     """
     return StreamingResponse(
-        _filtered_stream(req, detail),
+        _filtered_stream(req, detail, request.app.state.hooks),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# Default app (no hooks): `uvicorn agent_forge.api.app:app`.
+# To add hooks: `app = create_app(hooks=[MyHooks()])` in your own module.
+app = create_app()

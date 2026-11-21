@@ -17,9 +17,9 @@ def spy(monkeypatch):
     calls = []
     real = execution.execute_agent
 
-    async def wrapper(agent, task, label, tracer, **kw):
+    async def wrapper(agent, task, label, tracer, *args, **kw):
         calls.append(label)
-        return await real(agent, task, label, tracer, **kw)
+        return await real(agent, task, label, tracer, *args, **kw)
 
     # patch where each caller looks it up
     import agent_forge.core.graph_runner as gr
