@@ -205,7 +205,8 @@ with tab_traces:
                     "framework": t.get("framework_used") or "-",
                     "outcome": t["outcome"],
                     "latency_ms": t["total_latency_ms"],
-                    "cost_usd": t["total_cost_usd"],
+                    # None: the model has no price in agent_forge.pricing
+                    "cost_usd": "—" if t["total_cost_usd"] is None else f"{t['total_cost_usd']:.6f}",
                     "tokens_in": t["total_input_tokens"],
                     "tokens_out": t["total_output_tokens"],
                 }

@@ -141,7 +141,9 @@ def test_no_hooks_no_sources_baseline(stub_pipeline, plan):
         assert len(factories[-1].created[name].tasks) == 1  # every agent ran once
     row = db.query_runs()[0]
     assert row["outcome"] == "success"
-    assert row["guardrails_triggered"] == [] and row["metadata"] == {}
+    assert row["guardrails_triggered"] == [] and "hook_denials" not in row["metadata"]
+    # The stub agents' model has no price: unknown cost, flagged, never $0.
+    assert row["total_cost_usd"] is None and row["metadata"]["unpriced_models"] == ["fake-model"]
     assert row["trace_id"] == row["run_id"]  # no caller trace_id: defaults to run_id
     assert [a["status"] for a in row["agents_spawned"]] == ["success"] * len(names)
 

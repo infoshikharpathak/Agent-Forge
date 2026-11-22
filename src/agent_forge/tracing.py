@@ -22,22 +22,11 @@ from datetime import datetime, timezone
 from agent_forge import db
 from agent_forge.core.agent import AgentRunResult
 from agent_forge.core.context import RunContext
+from agent_forge.pricing import estimate_cost, sum_costs
 
-# Approximate $ per 1K tokens as (input_rate, output_rate). Unknown models cost
-# $0 — this table is illustrative/editable, not a source of billing truth.
-_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-5.4-mini": (0.00025, 0.001),
-    "gpt-5.4-nano": (0.00005, 0.0002),
-    "claude-sonnet-4-6": (0.003, 0.015),
-    "claude-opus-4-6": (0.015, 0.075),
-    "claude-haiku-4-5-20251001": (0.0008, 0.004),
-    "gemini-2.5-flash": (0.000075, 0.0003),
-}
-
-
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    in_rate, out_rate = _PRICING.get(model, (0.0, 0.0))
-    return (input_tokens / 1000) * in_rate + (output_tokens / 1000) * out_rate
+# Kept for callers that import it from here (bastion did); the table itself
+# lives in agent_forge.pricing. Returns None for an unpriced model.
+_estimate_cost = estimate_cost
 
 
 @dataclass
@@ -72,6 +61,7 @@ class RunTracer:
             "model": result.model,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
+            "cost_usd": estimate_cost(result.model, result.input_tokens, result.output_tokens),
             "latency_ms": round(latency_ms, 1),
             "status": status,
             "content": result.content,
@@ -93,10 +83,15 @@ class RunTracer:
         total_latency_ms = (time.perf_counter() - self._started_at) * 1000
         total_input = sum(a["input_tokens"] for a in self.agents_spawned)
         total_output = sum(a["output_tokens"] for a in self.agents_spawned)
-        total_cost = sum(
-            _estimate_cost(a["model"], a["input_tokens"], a["output_tokens"])
-            for a in self.agents_spawned
-        )
+        # Unpriced agents (cost_usd None) are left out of the total and listed
+        # in metadata["unpriced_models"]; with nothing priced the total is None.
+        total_cost = sum_costs([a["cost_usd"] for a in self.agents_spawned])
+        unpriced = sorted({a["model"] or "<none>" for a in self.agents_spawned if a["cost_usd"] is None})
+        metadata: dict = {}
+        if self.hook_denials:
+            metadata["hook_denials"] = self.hook_denials
+        if unpriced:
+            metadata["unpriced_models"] = unpriced
         row = {
             "run_id": self.run_id,
             "trace_id": self.trace_id,
@@ -108,12 +103,12 @@ class RunTracer:
             "agents_spawned": self.agents_spawned,
             "guardrails_triggered": self.guardrails_triggered,
             "total_latency_ms": round(total_latency_ms, 1),
-            "total_cost_usd": round(total_cost, 6),
+            "total_cost_usd": total_cost,
             "total_input_tokens": total_input,
             "total_output_tokens": total_output,
             "outcome": outcome,
             "error": error,
             "report": report,
-            "metadata": {"hook_denials": self.hook_denials} if self.hook_denials else {},
+            "metadata": metadata,
         }
         await asyncio.to_thread(db.insert_run, row)

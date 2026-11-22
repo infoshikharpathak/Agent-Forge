@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS runs (
     agents_spawned TEXT NOT NULL,
     guardrails_triggered TEXT NOT NULL,
     total_latency_ms REAL NOT NULL,
-    total_cost_usd REAL NOT NULL,
+    total_cost_usd REAL,
     total_input_tokens INTEGER NOT NULL,
     total_output_tokens INTEGER NOT NULL,
     outcome TEXT NOT NULL,
@@ -57,7 +57,23 @@ def _connect() -> sqlite3.Connection:
             conn.execute(ddl)
         except sqlite3.OperationalError:
             pass  # column already exists
+    _allow_null_cost(conn)
     return conn
+
+
+def _allow_null_cost(conn: sqlite3.Connection) -> None:
+    """Older DB files declare total_cost_usd NOT NULL, from when unpriced
+    models were stored as $0. SQLite can't drop a NOT NULL constraint in
+    place, so rebuild the table once with the current schema."""
+    cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(runs)")}
+    if not cols["total_cost_usd"]["notnull"]:
+        return
+    names = ", ".join(cols)
+    with conn:
+        conn.execute("ALTER TABLE runs RENAME TO runs_old")
+        conn.execute(_SCHEMA)
+        conn.execute(f"INSERT INTO runs ({names}) SELECT {names} FROM runs_old")
+        conn.execute("DROP TABLE runs_old")
 
 
 def insert_run(row: dict) -> None:

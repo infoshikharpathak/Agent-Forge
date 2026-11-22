@@ -142,6 +142,7 @@ src/agent_forge/
 │   └── settings.py       # Provider config + env resolution
 ├── registry.py            # AppRegistry, AppConfig — loads apps/, builds locked-app plans (no LLM)
 ├── tracing.py              # RunTracer — per-run trace accumulation, cost estimation
+├── pricing.py              # the per-model price table every cost estimate reads
 ├── db.py                   # SQLite persistence for traces (append-only)
 └── main.py                # CLI — `agent-forge run` (demo) / `agent-forge traces`
 
@@ -314,6 +315,8 @@ GET /traces/{run_id}
 Each row also carries a `trace_id`: the caller's own ID if one was passed to `/run`, otherwise the run's `run_id`. Hook denials appear in `guardrails_triggered` (as `hook:<event>:<outcome>:<agent>`), with their messages under `metadata.hook_denials`.
 
 **Scope note:** v1 tokenizes spawned-agent calls only — the orchestrator's own planning/guardrail LLM calls aren't yet counted, so `total_cost_usd`/`total_tokens` understate true spend for dynamic (non-locked) runs. A known, disclosed gap, not silently rounded into the totals.
+
+**Cost:** prices live in one table, `agent_forge/pricing.py` (USD per 1M tokens, each row noting where and when it was checked); bastion reads the same table. A model that isn't in it gets `cost_usd: null`, never `0.0`, and a warning is logged once per model. Run totals add up only the priced agents and list the rest in `metadata["unpriced_models"]`; a run with no priced agent has `total_cost_usd: null`.
 
 ---
 
