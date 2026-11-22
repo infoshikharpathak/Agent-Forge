@@ -30,7 +30,8 @@ class RunContext:
     agent_name: str | None = None
     agent_role: str | None = None
     app: str | None = None
-    """Reserved for app namespacing; always None for now."""
+    """The app this run belongs to (RunTracer's app_id), e.g. "chathub"; None
+    for runs outside any app."""
 
     def for_agent(self, name: str, role: str | None) -> RunContext:
         return replace(self, agent_name=name, agent_role=role)

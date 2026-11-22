@@ -90,3 +90,11 @@ def test_api_run_passes_trace_id_to_persisted_row(monkeypatch):
     rows = db.query_runs(trace_id="caller-trace-7")
     assert len(rows) == 1 and rows[0]["outcome"] == "failed"
     assert client.get("/traces", params={"trace_id": "caller-trace-7"}).json()[0]["run_id"] == rows[0]["run_id"]
+
+
+def test_tracer_run_context_carries_the_app():
+    from agent_forge.tracing import RunTracer
+
+    ctx = RunTracer(task="t", routing_tier="platform", app_id="chathub").run_context()
+    assert ctx.app == "chathub"
+    assert RunTracer(task="t", routing_tier="platform").run_context().app is None

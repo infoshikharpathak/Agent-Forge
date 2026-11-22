@@ -51,7 +51,7 @@ class RunTracer:
 
     def run_context(self) -> RunContext:
         """Base RunContext for agents executed under this tracer."""
-        return RunContext(trace_id=self.trace_id or self.run_id, run_id=self.run_id)
+        return RunContext(trace_id=self.trace_id or self.run_id, run_id=self.run_id, app=self.app_id)
 
     def record_agent(
         self, agent_id: str, result: AgentRunResult, latency_ms: float, status: str
