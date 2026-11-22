@@ -94,3 +94,8 @@ def test_old_db_with_not_null_cost_is_migrated(tmp_path, monkeypatch):
     assert notnull["total_cost_usd"] == 0
     db.insert_run({**db.get_run("r1"), "run_id": "r2", "total_cost_usd": None})
     assert db.get_run("r2")["total_cost_usd"] is None
+
+
+def test_embedding_models_bill_input_tokens_only():
+    assert pricing.estimate_cost("text-embedding-3-small", 1_000_000, 0) == 0.02
+    assert pricing.estimate_cost("text-embedding-3-small", 2967, 0) == 0.000059

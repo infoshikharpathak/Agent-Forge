@@ -24,6 +24,9 @@ PRICING_PER_1M: dict[str, tuple[float, float]] = {
     # (Standard, short context), checked 2026-11-22.
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
+    # Embeddings bill input tokens only. Same page (Specialized models), checked 2026-11-22.
+    "text-embedding-3-small": (0.02, 0.0),
+    "text-embedding-3-large": (0.13, 0.0),
     # Earlier entries; source and date not recorded.
     "gpt-5.4-mini": (0.25, 1.00),
     "gpt-5.4-nano": (0.05, 0.20),
