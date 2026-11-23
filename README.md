@@ -1,7 +1,7 @@
 # agent-forge
 
 [![CI](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/infoshikharpathak/Agent-Forge/blob/main/LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/infoshikharpathak/Agent-Forge/blob/main/LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 
 **Framework-agnostic AI agent orchestration.**
@@ -157,10 +157,10 @@ agent_forge_traces.db     # SQLite trace store (gitignored, zero-config default 
 ## Install
 
 ```bash
-pip install agent-forge                      # core + the OpenAI backend
-pip install "agent-forge[anthropic]"         # + the Anthropic backend
-pip install "agent-forge[api]"               # + the HTTP API (with the AutoGen and LangGraph backends)
-pip install "agent-forge[all]"               # every backend, the built-in tools and MCP
+pip install garrison-forge                      # core + the OpenAI backend
+pip install "garrison-forge[anthropic]"         # + the Anthropic backend
+pip install "garrison-forge[api]"               # + the HTTP API (with the AutoGen and LangGraph backends)
+pip install "garrison-forge[all]"               # every backend, the built-in tools and MCP
 ```
 
 | Extra | Adds |
@@ -174,7 +174,10 @@ pip install "agent-forge[all]"               # every backend, the built-in tools
 | `ui` | the Streamlit front end in this repo's `app.py` (`streamlit`) |
 | `all` | everything above except `ui` |
 
-Python 3.11 or newer. The import name is `agent_forge`. With a pip install,
+**The install name and the import name differ:** you install
+`garrison-forge` and import `agent_forge` (the CLI is still `agent-forge`).
+It is published as part of the [Garrison](https://github.com/infoshikharpathak/garrison)
+family. Python 3.11 or newer. With a pip install,
 set `AGENT_FORGE_APPS_DIR` to the folder holding your app configs (see
 [App Registry](#app-registry)).
 
@@ -720,3 +723,7 @@ Uses accumulated usage data and categorised prompt/output pairs to train small, 
 
 **Self-optimising orchestration**
 The system passively improves over time: usage data feeds back into prompt quality scoring, model selection refines via the performance registry, and accumulated outputs eventually seed custom model training. No manual intervention required — the orchestrator gets better the more it is used.
+
+## License
+
+Apache License 2.0. See [LICENSE](https://github.com/infoshikharpathak/Agent-Forge/blob/main/LICENSE).

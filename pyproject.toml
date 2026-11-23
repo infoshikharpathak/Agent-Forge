@@ -1,9 +1,9 @@
 [project]
-name = "agent-forge"
+name = "garrison-forge"
 version = "0.1.0"
 description = "Framework-agnostic AI agent orchestration: a manager + factory pattern over OpenAI, Anthropic, AutoGen and LangGraph backends, with tools, MCP, run tracing and cost tracking."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Shikhar Pathak" }]
 requires-python = ">=3.11"
@@ -37,11 +37,11 @@ langgraph = ["langgraph>=0.2.0", "langchain-openai>=0.1.0"]
 tools = ["ddgs>=0.1", "yfinance>=0.2", "wikipedia>=1.4"]
 mcp = ["mcp>=1.0"]
 # The HTTP API (agent_forge.api.app) serves the AutoGen and LangGraph backends.
-api = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "agent-forge[autogen,langgraph]"]
+api = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "garrison-forge[autogen,langgraph]"]
 # The repo's Streamlit app (app.py, not part of the package).
 ui = ["streamlit>=1.28"]
-all = ["agent-forge[anthropic,autogen,langgraph,tools,mcp,api]"]
-dev = ["agent-forge[all]", "pytest>=8", "pytest-asyncio>=0.23"]
+all = ["garrison-forge[anthropic,autogen,langgraph,tools,mcp,api]"]
+dev = ["garrison-forge[all]", "pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.urls]
 Homepage = "https://github.com/infoshikharpathak/Agent-Forge"

@@ -37,7 +37,7 @@ async def _run_demo() -> None:
     try:
         from agent_forge.backends.autogen import AutoGenFactory
     except ImportError as exc:  # the AutoGen backend is an optional extra
-        raise SystemExit(f"The demo runs on the AutoGen backend: pip install 'agent-forge[autogen]' ({exc})")
+        raise SystemExit(f"The demo runs on the AutoGen backend: pip install 'garrison-forge[autogen]' ({exc})")
     factory = AutoGenFactory(provider="openai")
     manager = AgentManager(factory)
 

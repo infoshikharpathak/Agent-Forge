@@ -2,14 +2,17 @@
 
 ## 0.1.0 (unreleased)
 
-First release on PyPI, as `agent-forge` (import `agent_forge`).
+First release on PyPI, as `garrison-forge` (import `agent_forge`, CLI
+`agent-forge`), one of the Garrison family of packages.
+
+- **License:** Apache-2.0 (was MIT).
 
 - **Orchestration:** a planner (Orchestrator) that builds a team for a goal,
   an AgentManager over pluggable factories, and a graph runner with
   conditional routing, failure handling and quality guardrails (goal
   clarity, plan validation, quality and grounding checks).
 - **Backends:** OpenAI (core), Anthropic, AutoGen and LangGraph. The last
-  three are extras: `pip install "agent-forge[anthropic]"`, `[autogen]`,
+  three are extras: `pip install "garrison-forge[anthropic]"`, `[autogen]`,
   `[langgraph]`, or `[all]`.
 - **Tools:** a process-wide tool registry, tool sources, the built-in tools
   (`[tools]`) and MCP servers (`[mcp]`).

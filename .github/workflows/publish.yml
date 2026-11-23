@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/agent-forge
+      url: https://test.pypi.org/p/garrison-forge
     permissions:
       id-token: write
     steps:
@@ -84,7 +84,7 @@ jobs:
     # the job waits for that manual approval.
     environment:
       name: pypi
-      url: https://pypi.org/p/agent-forge
+      url: https://pypi.org/p/garrison-forge
     permissions:
       id-token: write
     steps:
