@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## 0.1.2 (unreleased)
+
+- Unknown costs read "unknown" in `agent-forge traces` and the Streamlit
+  Traces tab (Run History and each run's agents), never `None` or a dash.
+  A run total that leaves out unpriced models reads like
+  `0.000016 + unknown`. Both use the new `agent_forge.trace_view`. The
+  `/traces` API is unchanged: an unknown cost is still `null` there.
+
+## 0.1.1 (2026-11-23)
 
 - README: retitled "Agent Forge (garrison-forge)", so the PyPI page names
   both the project and its install name.

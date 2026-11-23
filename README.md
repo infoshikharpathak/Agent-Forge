@@ -345,7 +345,7 @@ Each row also carries a `trace_id`: the caller's own ID if one was passed to `/r
 
 **Scope note:** v1 tokenizes spawned-agent calls only — the orchestrator's own planning/guardrail LLM calls aren't yet counted, so `total_cost_usd`/`total_tokens` understate true spend for dynamic (non-locked) runs. A known, disclosed gap, not silently rounded into the totals.
 
-**Cost:** prices live in one table, `agent_forge/pricing.py` (USD per 1M tokens, each row noting where and when it was checked); Garrison reads the same table. A model that isn't in it gets `cost_usd: null`, never `0.0`, and a warning is logged once per model. Run totals add up only the priced agents and list the rest in `metadata["unpriced_models"]`; a run with no priced agent has `total_cost_usd: null`.
+**Cost:** prices live in one table, `agent_forge/pricing.py` (USD per 1M tokens, each row noting where and when it was checked); Garrison reads the same table. A model that isn't in it gets `cost_usd: null`, never `0.0` (the Traces tab and `agent-forge traces` show it as "unknown"), and a warning is logged once per model. Run totals add up only the priced agents and list the rest in `metadata["unpriced_models"]`; a run with no priced agent has `total_cost_usd: null`.
 
 ---
 

@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from agent_forge.core.manager import AgentManager
+from agent_forge.trace_view import run_cost
 from agent_forge.core.orchestrator import Orchestrator
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -79,10 +80,6 @@ def _cmd_run(_args: argparse.Namespace) -> None:
     asyncio.run(_run_demo())
 
 
-def _cost(value: float | None) -> str:
-    return "—" if value is None else str(value)  # None: no price for the model
-
-
 def _format_traces_table(rows: list[dict]) -> str:
     if not rows:
         return "No traces found."
@@ -96,7 +93,7 @@ def _format_traces_table(rows: list[dict]) -> str:
         values = [
             r["run_id"][:8], r["timestamp"][:19], r["routing_tier"], r.get("app_id") or "-",
             r.get("framework_used") or "-", r["outcome"],
-            str(r["total_latency_ms"]), _cost(r["total_cost_usd"]),
+            str(r["total_latency_ms"]), run_cost(r),
             str(r["total_input_tokens"]), str(r["total_output_tokens"]),
         ]
         lines.append(" | ".join(str(v).ljust(w) for v, w in zip(values, col_widths)))

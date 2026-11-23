@@ -15,6 +15,8 @@ import json
 import httpx
 import streamlit as st
 
+from agent_forge.trace_view import agent_rows, run_rows
+
 API_URL = "http://localhost:8000"
 
 # ── API helpers ───────────────────────────────────────────────────────────────
@@ -196,22 +198,7 @@ with tab_traces:
         st.info("No traces yet — run a goal from the Chat tab, or adjust filters.")
     else:
         st.dataframe(
-            [
-                {
-                    "run_id": t["run_id"][:8],
-                    "timestamp": t["timestamp"][:19],
-                    "tier": t["routing_tier"],
-                    "app_id": t.get("app_id") or "-",
-                    "framework": t.get("framework_used") or "-",
-                    "outcome": t["outcome"],
-                    "latency_ms": t["total_latency_ms"],
-                    # None: the model has no price in agent_forge.pricing
-                    "cost_usd": "—" if t["total_cost_usd"] is None else f"{t['total_cost_usd']:.6f}",
-                    "tokens_in": t["total_input_tokens"],
-                    "tokens_out": t["total_output_tokens"],
-                }
-                for t in traces
-            ],
+            run_rows(traces),
             use_container_width=True,
             hide_index=True,
         )
@@ -236,7 +223,7 @@ with tab_traces:
             if detail["agents_spawned"]:
                 st.markdown("**Agents spawned**")
                 st.dataframe(
-                    [{k: v for k, v in a.items() if k != "content"} for a in detail["agents_spawned"]],
+                    agent_rows(detail["agents_spawned"]),
                     use_container_width=True, hide_index=True,
                 )
                 st.markdown("**Agent output**")
