@@ -1,0 +1,5 @@
+# sdist: the package, README, LICENSE and pyproject only.
+prune tests
+prune evals
+prune examples
+global-exclude *.py[cod] *.db *.sqlite *.jsonl .env

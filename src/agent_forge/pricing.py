@@ -1,6 +1,6 @@
 """Per-model token pricing: the one table every cost estimate reads.
 
-Agent Forge's run traces use it, and so does bastion (agent and injection-
+Agent Forge's run traces use it, and so does Garrison (agent and injection-
 classifier costs), so a price is added here once and applies everywhere.
 
 A model that isn't in the table has *no* cost estimate: ``estimate_cost``

@@ -1,51 +1,59 @@
 [project]
 name = "agent-forge"
 version = "0.1.0"
-description = "Framework-agnostic AI agent orchestration — manager + factory pattern with AutoGen, LangGraph, and Anthropic backends."
+description = "Framework-agnostic AI agent orchestration: a manager + factory pattern over OpenAI, Anthropic, AutoGen and LangGraph backends, with tools, MCP, run tracing and cost tracking."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Shikhar Pathak" }]
 requires-python = ">=3.11"
+keywords = ["agents", "llm", "orchestration", "openai", "anthropic", "autogen", "langgraph", "mcp"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# The core: agents, orchestrator, graph runner, tool registry, tracing, and
+# the OpenAI backend (the orchestrator plans with OpenAI-compatible APIs).
 dependencies = [
-  # Core
-  "pydantic>=2.0",
+  "pydantic>=2.0,<3",
   "python-dotenv>=1.0.1",
-  "openai>=1.50",
-
-  # AutoGen backend (working)
-  "autogen-agentchat>=0.4.8",
-  "autogen-ext[openai]>=0.4.8",
-
-  # API
-  "fastapi>=0.110",
-  "uvicorn[standard]>=0.29",
-
-  # UI
-  "streamlit>=1.28",
-
-  # Tools
-  "ddgs>=0.1",
-  "yfinance>=0.2",
-  "wikipedia>=1.4",
-  "mcp>=1.0",
-
-  # LangGraph backend
-  "langgraph>=0.2.0",
-  "langchain-openai>=0.1.0",
-
-  # App registry (YAML app configs)
+  "openai>=1.50,<3",
   "pyyaml>=6.0",
-
-  # Anthropic backend
-  "anthropic>=0.40.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+anthropic = ["anthropic>=0.40.0"]
+autogen = ["autogen-agentchat>=0.4.8", "autogen-ext[openai]>=0.4.8"]
+langgraph = ["langgraph>=0.2.0", "langchain-openai>=0.1.0"]
+# Built-in tools: web search, finance quotes, Wikipedia.
+tools = ["ddgs>=0.1", "yfinance>=0.2", "wikipedia>=1.4"]
+mcp = ["mcp>=1.0"]
+# The HTTP API (agent_forge.api.app) serves the AutoGen and LangGraph backends.
+api = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "agent-forge[autogen,langgraph]"]
+# The repo's Streamlit app (app.py, not part of the package).
+ui = ["streamlit>=1.28"]
+all = ["agent-forge[anthropic,autogen,langgraph,tools,mcp,api]"]
+dev = ["agent-forge[all]", "pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/infoshikharpathak/Agent-Forge"
+Repository = "https://github.com/infoshikharpathak/Agent-Forge"
+Issues = "https://github.com/infoshikharpathak/Agent-Forge/issues"
+Changelog = "https://github.com/infoshikharpathak/Agent-Forge/blob/main/CHANGELOG.md"
 
 [project.scripts]
 agent-forge = "agent_forge.main:main"
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

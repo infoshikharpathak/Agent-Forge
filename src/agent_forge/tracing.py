@@ -24,7 +24,7 @@ from agent_forge.core.agent import AgentRunResult
 from agent_forge.core.context import RunContext
 from agent_forge.pricing import estimate_cost, sum_costs
 
-# Kept for callers that import it from here (bastion did); the table itself
+# Kept for callers that import it from here (Garrison did); the table itself
 # lives in agent_forge.pricing. Returns None for an unpriced model.
 _estimate_cost = estimate_cost
 

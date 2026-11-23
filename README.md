@@ -1,7 +1,7 @@
 # agent-forge
 
 [![CI](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/infoshikharpathak/Agent-Forge/blob/main/LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 
 **Framework-agnostic AI agent orchestration.**
@@ -10,7 +10,7 @@ Send a goal, get back a synthesized report — produced by a dynamically planned
 
 Two additive capabilities sit on top of that dynamic core:
 
-- **App Registry** — apps (e.g. [logscribe](../logscribe), [meeting-scribe](../meeting-scribe)) can register a fixed agent workflow in a config file. When a goal matches, agent-forge skips dynamic planning entirely (or partially) instead of inventing a team from scratch every time — cheaper, faster, and repeatable for the same kind of task.
+- **App Registry** — apps (e.g. logscribe, meeting-scribe) can register a fixed agent workflow in a config file. When a goal matches, agent-forge skips dynamic planning entirely (or partially) instead of inventing a team from scratch every time — cheaper, faster, and repeatable for the same kind of task.
 - **Traceability** — every run, whichever path it took, is persisted to a local SQLite database: which agents ran, what each one produced, tokens/cost/latency, which guardrails fired. Queryable via CLI, API, or the Streamlit UI's Traces tab.
 
 Zero registered apps and no queries against `/traces` is exactly today's behavior — both are fully additive.
@@ -154,12 +154,37 @@ agent_forge_traces.db     # SQLite trace store (gitignored, zero-config default 
 
 ---
 
-## Setup
+## Install
 
 ```bash
+pip install agent-forge                      # core + the OpenAI backend
+pip install "agent-forge[anthropic]"         # + the Anthropic backend
+pip install "agent-forge[api]"               # + the HTTP API (with the AutoGen and LangGraph backends)
+pip install "agent-forge[all]"               # every backend, the built-in tools and MCP
+```
+
+| Extra | Adds |
+|---|---|
+| `anthropic` | Anthropic backend (`anthropic`) |
+| `autogen` | AutoGen backend (`autogen-agentchat`, `autogen-ext[openai]`); the `agent-forge run` demo uses it |
+| `langgraph` | LangGraph backend (`langgraph`, `langchain-openai`) |
+| `tools` | built-in web search, finance and Wikipedia tools (`ddgs`, `yfinance`, `wikipedia`) |
+| `mcp` | MCP servers as tool sources (`mcp`) |
+| `api` | `agent_forge.api.app` (`fastapi`, `uvicorn`, plus `autogen` and `langgraph`) |
+| `ui` | the Streamlit front end in this repo's `app.py` (`streamlit`) |
+| `all` | everything above except `ui` |
+
+Python 3.11 or newer. The import name is `agent_forge`. With a pip install,
+set `AGENT_FORGE_APPS_DIR` to the folder holding your app configs (see
+[App Registry](#app-registry)).
+
+## Setup (from source)
+
+```bash
+git clone https://github.com/infoshikharpathak/Agent-Forge && cd Agent-Forge
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[all,ui]"
 cp .env.example .env
 # add your OPENAI_API_KEY to .env
 ```
@@ -187,7 +212,7 @@ uvicorn agent_forge.api.app:app --reload --port 8000
 streamlit run app.py
 ```
 
-**CLI** (`pip install -e .` registers the `agent-forge` console script):
+**CLI** (installing the package registers the `agent-forge` console script):
 
 ```bash
 agent-forge run                          # hardcoded demo goal, autogen only
@@ -255,7 +280,7 @@ data: {"type": "error", "message": "..."}
 
 Apps can register a fixed agent workflow instead of relying on dynamic planning every time — useful when the same kind of task recurs (log root-cause analysis, meeting minutes, etc.) and inventing a new team per request is unnecessary cost/latency.
 
-Drop a config file in `src/agent_forge/apps/`:
+Drop a config file in `src/agent_forge/apps/` (or in the folder `AGENT_FORGE_APPS_DIR` names):
 
 ```json
 {
@@ -316,7 +341,7 @@ Each row also carries a `trace_id`: the caller's own ID if one was passed to `/r
 
 **Scope note:** v1 tokenizes spawned-agent calls only — the orchestrator's own planning/guardrail LLM calls aren't yet counted, so `total_cost_usd`/`total_tokens` understate true spend for dynamic (non-locked) runs. A known, disclosed gap, not silently rounded into the totals.
 
-**Cost:** prices live in one table, `agent_forge/pricing.py` (USD per 1M tokens, each row noting where and when it was checked); bastion reads the same table. A model that isn't in it gets `cost_usd: null`, never `0.0`, and a warning is logged once per model. Run totals add up only the priced agents and list the rest in `metadata["unpriced_models"]`; a run with no priced agent has `total_cost_usd: null`.
+**Cost:** prices live in one table, `agent_forge/pricing.py` (USD per 1M tokens, each row noting where and when it was checked); Garrison reads the same table. A model that isn't in it gets `cost_usd: null`, never `0.0`, and a warning is logged once per model. Run totals add up only the priced agents and list the rest in `metadata["unpriced_models"]`; a run with no priced agent has `total_cost_usd: null`.
 
 ---
 
