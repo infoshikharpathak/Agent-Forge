@@ -18,6 +18,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from enum import Enum
+import os
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -44,7 +45,9 @@ from agent_forge.tracing import RunTracer
 # ── App registry ─────────────────────────────────────────────────────────────
 
 app_registry = AppRegistry()
-_APPS_DIR = Path(__file__).resolve().parent.parent / "apps"
+# AGENT_FORGE_APPS_DIR points the registry at your own app configs (a pip
+# install has no apps of its own); the default is the source tree's apps/.
+_APPS_DIR = Path(os.environ.get("AGENT_FORGE_APPS_DIR") or Path(__file__).resolve().parent.parent / "apps")
 
 
 @asynccontextmanager

@@ -13,7 +13,6 @@ import argparse
 import asyncio
 import logging
 
-from agent_forge.backends.autogen import AutoGenFactory
 from agent_forge.core.manager import AgentManager
 from agent_forge.core.orchestrator import Orchestrator
 
@@ -35,6 +34,10 @@ TASKS: dict[str, str] = {
 
 async def _run_demo() -> None:
     orchestrator = Orchestrator(provider="openai")
+    try:
+        from agent_forge.backends.autogen import AutoGenFactory
+    except ImportError as exc:  # the AutoGen backend is an optional extra
+        raise SystemExit(f"The demo runs on the AutoGen backend: pip install 'agent-forge[autogen]' ({exc})")
     factory = AutoGenFactory(provider="openai")
     manager = AgentManager(factory)
 
