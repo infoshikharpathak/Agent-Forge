@@ -42,6 +42,15 @@ from agent_forge.tools.mcp_bridge import MCPBridge
 from agent_forge.tools.sources import ToolSource, register_tool_source, unregister_tool_source
 from agent_forge.tracing import RunTracer
 
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("garrison-forge")
+    except Exception:  # running from a checkout that isn't installed
+        return "dev"
+
+
 # ── App registry ─────────────────────────────────────────────────────────────
 
 app_registry = AppRegistry()
@@ -91,7 +100,7 @@ def create_app(
     """
     api = FastAPI(
         title="agent-forge",
-        version="0.1.0",
+        version=_package_version(),
         description=(
             "Framework-agnostic AI agent orchestration API. "
             "Send a goal, get back a synthesized report produced by a dynamically planned "

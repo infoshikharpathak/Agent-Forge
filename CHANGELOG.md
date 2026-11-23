@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.1 (unreleased)
+
+- README: retitled "Agent Forge (garrison-forge)", so the PyPI page names
+  both the project and its install name.
+- The HTTP API reports the installed package version instead of a fixed
+  "0.1.0".
+
+## 0.1.0 (2026-11-23)
 
 First release on PyPI, as `garrison-forge` (import `agent_forge`, CLI
 `agent-forge`), one of the Garrison family of packages.

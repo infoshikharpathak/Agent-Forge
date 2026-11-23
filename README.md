@@ -1,4 +1,4 @@
-# agent-forge
+# Agent Forge (garrison-forge)
 
 [![CI](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/infoshikharpathak/Agent-Forge/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/garrison-forge.svg)](https://pypi.org/project/garrison-forge/)
