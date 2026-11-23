@@ -76,6 +76,8 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # Re-running a partly failed release skips files already uploaded.
+          skip-existing: true
 
   publish-pypi:
     needs: publish-testpypi
@@ -93,3 +95,6 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Re-running a partly failed release skips files already uploaded.
+          skip-existing: true
